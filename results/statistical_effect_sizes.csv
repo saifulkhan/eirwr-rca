@@ -1,0 +1,78 @@
+visibility,baseline,cliffs_delta,magnitude,proposed
+0.0,MicroRCA,-0.1268,negligible,eIRWR
+0.0,CloudRanger,-0.5077,large,eIRWR
+0.0,In-Degree,-0.518825,large,eIRWR
+0.0,MicroHECL,-0.071375,negligible,eIRWR
+0.0,TraceDiag,-0.37395,medium,eIRWR
+0.0,Neighbor Corr.,-0.2769,small,eIRWR
+0.0,MonitorRank,-0.14635,negligible,eIRWR
+0.0,MicroRank,0.970325,large,eIRWR
+0.0,CORAL,-0.125375,negligible,eIRWR
+0.0,TraceRank,0.609775,large,eIRWR
+0.0,IRWR,-0.0638,negligible,eIRWR
+0.05,MicroRCA,-0.16125,small,eIRWR
+0.05,CloudRanger,-0.6826,large,eIRWR
+0.05,In-Degree,-0.8616,large,eIRWR
+0.05,MicroHECL,-0.2128,small,eIRWR
+0.05,TraceDiag,-0.23775,small,eIRWR
+0.05,Neighbor Corr.,-0.33715,medium,eIRWR
+0.05,MonitorRank,-0.178375,small,eIRWR
+0.05,MicroRank,0.962025,large,eIRWR
+0.05,CORAL,-0.15865,small,eIRWR
+0.05,TraceRank,0.5925,large,eIRWR
+0.05,IRWR,-0.053325,negligible,eIRWR
+0.1,MicroRCA,-0.22945,small,eIRWR
+0.1,CloudRanger,-0.892575,large,eIRWR
+0.1,In-Degree,-0.97115,large,eIRWR
+0.1,MicroHECL,-0.32755,small,eIRWR
+0.1,TraceDiag,-0.371825,medium,eIRWR
+0.1,Neighbor Corr.,-0.547775,large,eIRWR
+0.1,MonitorRank,-0.2468,small,eIRWR
+0.1,MicroRank,0.947775,large,eIRWR
+0.1,CORAL,-0.223025,small,eIRWR
+0.1,TraceRank,0.52155,large,eIRWR
+0.1,IRWR,-0.04975,negligible,eIRWR
+0.15,MicroRCA,-0.3665,medium,eIRWR
+0.15,CloudRanger,-0.981675,large,eIRWR
+0.15,In-Degree,-0.995025,large,eIRWR
+0.15,MicroHECL,-0.512725,large,eIRWR
+0.15,TraceDiag,-0.522925,large,eIRWR
+0.15,Neighbor Corr.,-0.824025,large,eIRWR
+0.15,MonitorRank,-0.37465,medium,eIRWR
+0.15,MicroRank,0.89065,large,eIRWR
+0.15,CORAL,-0.357775,medium,eIRWR
+0.15,TraceRank,0.330075,medium,eIRWR
+0.15,IRWR,-0.0781,negligible,eIRWR
+0.2,MicroRCA,-0.524425,large,eIRWR
+0.2,CloudRanger,-0.990875,large,eIRWR
+0.2,In-Degree,-0.99855,large,eIRWR
+0.2,MicroHECL,-0.6849,large,eIRWR
+0.2,TraceDiag,-0.677625,large,eIRWR
+0.2,Neighbor Corr.,-0.94845,large,eIRWR
+0.2,MonitorRank,-0.5095,large,eIRWR
+0.2,MicroRank,0.76735,large,eIRWR
+0.2,CORAL,-0.5045,large,eIRWR
+0.2,TraceRank,-0.04005,negligible,eIRWR
+0.2,IRWR,-0.1313,negligible,eIRWR
+0.3,MicroRCA,-0.672525,large,eIRWR
+0.3,CloudRanger,-0.99905,large,eIRWR
+0.3,In-Degree,-0.99975,large,eIRWR
+0.3,MicroHECL,-0.849525,large,eIRWR
+0.3,TraceDiag,-0.798625,large,eIRWR
+0.3,Neighbor Corr.,-0.9798,large,eIRWR
+0.3,MonitorRank,-0.6522,large,eIRWR
+0.3,MicroRank,0.32145,small,eIRWR
+0.3,CORAL,-0.65735,large,eIRWR
+0.3,TraceRank,0.39905,medium,eIRWR
+0.3,IRWR,-0.281875,small,eIRWR
+0.5,MicroRCA,-0.6213,large,eIRWR
+0.5,CloudRanger,-0.99995,large,eIRWR
+0.5,In-Degree,-1.0,large,eIRWR
+0.5,MicroHECL,-0.9225,large,eIRWR
+0.5,TraceDiag,-0.744525,large,eIRWR
+0.5,Neighbor Corr.,-0.99985,large,eIRWR
+0.5,MonitorRank,-0.61235,large,eIRWR
+0.5,MicroRank,-0.055775,negligible,eIRWR
+0.5,CORAL,-0.6156,large,eIRWR
+0.5,TraceRank,0.08,negligible,eIRWR
+0.5,IRWR,-0.17235,small,eIRWR
