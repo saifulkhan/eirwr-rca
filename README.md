@@ -1,6 +1,6 @@
 # services-computing-rca
 
-Root Cause Analysis (RCA) for microservice architectures using **Iterative Random Walk with Restart (RWR)**
+Root Cause Analysis (RCA) for microservice architectures using Enhanced Iterative Random Walk with Restart.
 
 ---
 ## Setup
@@ -143,7 +143,7 @@ This generates:
 - `results/real_anomaly_windows.csv` - Detected real anomaly timestamps
 - `results/anomaly_cascades.csv` - Temporal cascade patterns
 
-### Option 3: Paper figures and statistics
+### Option 3: Analysis
 
 ```sh
 # Regenerate the four figures in paper/figures/ from results/*.csv
@@ -169,8 +169,3 @@ The experiment pipeline evaluates the RWR algorithm using a chaos engineering ap
 
 - **PR@K** (Precision at K): fraction of incidents where the true root cause appears in the top K candidates
 - **MRR** (Mean Reciprocal Rank): average of 1/rank across all incidents (higher is better, max 1.0)
-
-
-## Method
-
-The method (IRWR / eIRWR) is described in the paper source at `paper/main.tex`; the implementation lives in `src/rca/irwr.py`.
