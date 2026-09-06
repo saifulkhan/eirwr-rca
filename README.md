@@ -1,4 +1,4 @@
-# services-computing-rca
+# eIRWR -- Enhanced Iterative Random Walk with Restart
 
 Root Cause Analysis (RCA) for microservice architectures using Enhanced Iterative Random Walk with Restart.
 
