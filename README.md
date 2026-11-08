@@ -1,171 +1,189 @@
-# eIRWR -- Enhanced Iterative Random Walk with Restart
+# eIRWR: Enhanced Iterative Random Walk with Restart
 
-Root Cause Analysis (RCA) for microservice architectures using Enhanced Iterative Random Walk with Restart.
+Root cause analysis (RCA) for microservice architectures. eIRWR ranks
+services by how likely they are to be the root cause of an incident,
+using only the service call graph and aggregate anomaly scores.
 
----
-## Setup
+This repository contains the implementation, the baselines, and the
+scripts that produce every table and figure in the paper.
 
-Requires Python >= 3.13.
+## Quick start: reproduce the paper
+
+```sh
+git clone https://github.com/saifulkhan/eirwr-rca.git && cd eirwr-rca
+uv sync                              # 1. install dependencies
+bash scripts/download_data.sh        # 2. download the dataset
+bash scripts/reproduce_paper.sh      # 3. run all experiments
+```
+
+Step 3 overwrites the CSV files in `results/`, which are committed to
+the repository. To see whether your run matches the paper, compare
+against the committed versions:
+
+```sh
+git diff --stat results/
+```
+
+An empty diff for a file means an exact reproduction.
+`computational_metrics.csv` (runtime and memory) is expected to differ,
+because timings depend on the machine. On other platforms, floating
+point values may also differ in the last digits.
+
+To regenerate the figures in `paper/figures/` from the CSV files:
+
+```sh
+uv run python scripts/make_paper_figures.py
+```
+
+## Requirements
+
+- Linux or macOS with `bash`, `wget` and `tar`.
+- Python >= 3.13 and [uv](https://docs.astral.sh/uv/). `uv sync`
+  installs the exact package versions in `uv.lock`.
+- About 15 GB of free disk space for the dataset.
+- Several CPU cores. The main comparison runs in parallel. The full
+  run took about 75 minutes on a 28-core machine with 196 GB of RAM.
+
+## Step details
+
+### 1. Install
 
 ```sh
 uv sync
 ```
 
----
-## Dataset
+### 2. Dataset
 
-The [Alibaba Microservice Trace Dataset v2022](https://github.com/alibaba/clusterdata/tree/master/cluster-trace-microservices-v2022) provides real-world traces from a large-scale production microservice cluster.
+The experiments use the
+[Alibaba Microservice Trace Dataset v2022](https://github.com/alibaba/clusterdata/tree/master/cluster-trace-microservices-v2022).
+`scripts/download_data.sh` downloads the five files below into
+`data/data/` and extracts them (about 0.9 GB download, 13 GB
+extracted). The script can be re-run safely: it skips finished files
+and resumes partial downloads.
 
-To download the data:
+| File | Used for |
+| --- | --- |
+| `CallGraph/CallGraph_{84,136,297}.csv` | the three topologies CG84, CG136, CG297 |
+| `MSRTMCR/MCRRTUpdate_0.csv` | real anomaly windows |
+| `MSMetrics/MSMetricsUpdate_0.csv` | optional CPU/memory statistics |
 
-```sh
-bash data/clusterdata/cluster-trace-microservices-v2022/fetchData.sh start_date=0d0 end_date=1d1
-```
+### 3. Experiments
 
-One CSV file from each subfolder should be unzipped into `data/data/`. The paper experiments use `CallGraph_84.csv`, `CallGraph_136.csv`, and `CallGraph_297.csv` (referenced by index, e.g. `--dataset-index 297`). Use `scripts/select_topologies.py` to scan candidate call graphs and reproduce the topology selection.
+`scripts/reproduce_paper.sh` runs the steps below in order. Extra
+arguments are passed to `evaluate_performance.py`, for example
+`--n-jobs 8` to limit the number of workers.
 
-| Dataset     | Rows (sampled) | Key columns                                                       |
-| ----------- | -------------- | ----------------------------------------------------------------- |
-| CallGraph   | 500K           | traceid, um (caller), dm (callee), rt (response time ms), rpctype |
-| MSMetrics   | 500K           | msname, cpu_utilization, memory_utilization                       |
-| MSRTMCR     | 500K           | msname, {rpc,db,mc,mq,http}\_{rt,mcr}                             |
-| NodeMetrics | 500K           | nodeid, cpu_utilization, memory_utilization                       |
-
----
-## Running experiments
-
-The project includes both automated Python scripts and interactive Jupyter notebooks for running experiments.
-
-### Option 1: Automated evaluation script (recommended)
-
-Run all experiments using the consolidated evaluation script:
+To keep the run going after you log out or close the editor:
 
 ```sh
-# Run all experiments (default: 200 incidents, 7 visibility levels, dataset 297)
-uv run python scripts/evaluate_performance.py
-
-# Quick mode (faster, fewer configurations)
-uv run python scripts/evaluate_performance.py --quick
-
-# Custom configuration
-uv run python scripts/evaluate_performance.py --n-incidents 100 --dataset-index 297
-
-# Run specific experiments (1-7)
-uv run python scripts/evaluate_performance.py --experiments 1 2 3
-
-# Multi-topology evaluation
-uv run python scripts/evaluate_performance.py --dataset-indices 297 298 299
+nohup bash scripts/reproduce_paper.sh > reproduce.log 2>&1 &
+tail -f reproduce.log
 ```
 
-**Parallelized version** (for multi-core machines):
+Each step can also be run on its own (prefix with `uv run python`):
 
-```sh
-# Run all experiments in parallel using all available CPUs
-uv run python scripts/evaluate_performance_parallel.py
+| Command | Output in `results/` | Paper |
+| --- | --- | --- |
+| `scripts/analyze_real_metrics.py --nrows 1000000` | `real_anomaly_windows.csv` | input to Table real-world |
+| `scripts/evaluate_performance.py --experiments comparison` | `full_comparison_metrics_CG*.csv`, `per_incident_ranks_CG*.csv`, `multi_topology_metrics.csv` | Table main-results, MRR figures |
+| `scripts/evaluate_performance.py --experiments compute` | `computational_metrics.csv` | Table computational, scalability figure |
+| `scripts/evaluate_performance.py --experiments convergence` | `convergence_metrics.csv` | convergence figure |
+| `scripts/evaluate_performance.py --experiments stats` | `statistical_*.csv` | Table Wilcoxon, Friedman test |
+| `scripts/evaluate_performance.py --experiments real` | `real_world_evaluation.csv` | Table real-world |
+| `scripts/run_ablation.py --dataset-index 84` | `ablation_metrics.csv` | Table ablation |
 
-# Control parallelism (e.g., use 64 CPUs)
-uv run python scripts/evaluate_performance_parallel.py --n-jobs 64
+The `stats` and `real` experiments read the output of `comparison` and
+`analyze_real_metrics.py`, so run those first.
 
-# Quick mode with parallelization
-uv run python scripts/evaluate_performance_parallel.py --quick
+Useful options of `evaluate_performance.py` (see `--help`):
 
-# Run specific experiments in parallel
-uv run python scripts/evaluate_performance_parallel.py --experiments 1 2 3
+- `--quick`: a smaller configuration (4 visibility levels, 50
+  incidents) to check that everything runs.
+- `--resume`: skip topologies whose comparison CSV already exists.
+- `--seed`: random seed (default 42). Results depend only on the seed,
+  not on the number of workers.
 
-# Run in background (continues even if you close terminal/editor)
-nohup uv run python scripts/evaluate_performance_parallel.py > experiments.log 2>&1 &
+### Topology selection (optional)
+
+`scripts/select_topologies.py` reproduces how CG84, CG136 and CG297
+were chosen and writes `results/topology_stats.csv` and
+`results/selected_topologies.csv` (Table dataset-stats). It scans all
+500 call-graph archives, so it needs the full CallGraph download
+(`fetchData.sh` in the Alibaba repository).
+
+## Evaluation protocol
+
+1. **Graph construction.** Build the service dependency graph from the
+   call records of each topology. Edge weights are normalized call
+   counts.
+2. **Anomaly injection.** For each simulated incident, pick a random
+   callee as the root cause. Propagate the fault backward to its callers
+   with geometric decay (0.6 per hop, 5 hops) and add Gaussian noise
+   (standard deviation 0.05). The visibility parameter sets the anomaly
+   score of the root cause itself.
+3. **RCA.** Every method ranks all services for the same incidents.
+4. **Metrics.** PR@k is the fraction of incidents with the true root
+   cause in the top k. MRR is the mean of 1/rank.
+
+Trace-level methods (MicroRank, TraceRank) are evaluated on traces
+simulated from the true root cause. They therefore act as an upper
+bound and are not part of the aggregate-metric comparison in the paper.
+In the result files, Corr-Fusion is named `CORAL`.
+
+## Using eIRWR on your own graph
+
+```python
+import numpy as np
+from src.rca import compute_weight_matrix, irwr_enhanced
+
+# edges_df has columns um (caller), dm (callee), request_count
+W = compute_weight_matrix(edges_df, nodes)
+s_obs = anomaly_scores / anomaly_scores.sum()  # one score per node
+scores, _ = irwr_enhanced(W, s_obs)
+ranking = [nodes[i] for i in np.argsort(-scores)]
 ```
 
-The parallelized script uses `joblib` to distribute workload across multiple CPUs: Parallelizes incident simulations within each experiment; Runs method benchmarks concurrently; Significantly faster on multi-core systems (tested on 126 CPUs); Same results as sequential script (reproducible with same seed)
+## Code layout
 
-Monitoring parallel execution:
-
-While the script runs, you can monitor progress using these commands:
-
-```sh
-# Check running processes
-ps aux | grep evaluate_performance_parallel | grep -v grep
-
-# Monitor CPU and memory usage
-top -b -n 1 | head -20
-
-# View progress in real-time (if running in background)
-# The background process ID is shown when you start the script
-
-# Check generated results
-ls -lth results/*.csv | head -10
-
-# Monitor progress in real-time
-tail -f experiments.log
+```text
+src/loader.py          dataset loaders
+src/rca/graph.py       dependency graph, weight matrix W, M_R
+src/rca/irwr.py        IRWR and eIRWR
+src/rca/baselines.py   aggregate-metric baselines and MicroRank
+src/rca/tracerank.py   TraceRank and trace simulation
+src/rca/simulation.py  anomaly injection
+src/rca/metrics.py     PR@k, MRR
+src/rca/statistics.py  Friedman, Wilcoxon, Cliff's delta, Nemenyi
+src/rca/real_eval.py   real anomaly vectors, label-free metrics
+src/vis/               paper figures
+scripts/               experiment entry points
+notebooks/             method tutorial and figure notebook
 ```
 
-**Expected execution time** (with 126 CPUs, 200 incidents per configuration):
-- Experiment 1 (Scale × Visibility): ~20-30 minutes (6 dataset sizes × 7 visibilities)
-- Experiment 2 (Full Comparison): ~15-20 minutes (7 visibilities on full dataset)
-- Experiment 3 (Computational Benchmarks): ~5-10 minutes (5 dataset sizes × 13 methods)
-- Experiment 4 (Convergence Analysis): ~10-15 minutes (4 dataset sizes × 7 alphas × 20 trials)
-- Experiment 5 (Per-Incident Ranks): ~15-20 minutes (7 visibilities × 200 incidents)
-- **Total**: ~65-95 minutes for all experiments
+## Citation
 
-**Available experiments:**
-1. **Scale × Visibility**: Evaluate methods across dataset sizes (100K-10M rows) and visibility levels (0.0-0.5)
-2. **Full Comparison**: Compare all methods on the largest dataset with all baselines
-3. **Computational Benchmarks**: Measure wall-clock time and peak memory for each method
-4. **Convergence Analysis**: Measure IRWR iteration counts vs alpha and graph size
-5. **Per-Incident Analysis**: Save detailed per-incident ranks for statistical tests
-6. **Statistical Tests**: Run Friedman and Wilcoxon signed-rank tests on results from Experiment 5
-7. **Real-World Evaluation**: Evaluate methods on real anomaly windows (requires running `analyze_real_metrics.py` first)
+If you use this code, please cite the paper:
 
-**Results** are saved as CSV files in `results/`:
-- `scale_visibility_metrics.csv` - Experiment 1
-- `full_comparison_metrics.csv` - Experiment 2
-- `computational_metrics.csv` - Experiment 3
-- `convergence_metrics.csv` - Experiment 4
-- `per_incident_ranks.csv` - Experiment 5
-- `statistical_*.csv` - Experiment 6
-- `real_world_evaluation.csv` - Experiment 7
+> Saiful Khan and Afrah Farea. eIRWR: Enhanced Iterative Random Walk
+> with Restart for Scalable Root Cause Analysis in Microservices.
+> arXiv:2608.08073, 2026.
 
-### Option 2: Analyze real metrics (optional)
-
-Extract real anomaly patterns from the dataset:
-
-```sh
-# Analyze real metrics and detect anomaly windows
-uv run python scripts/analyze_real_metrics.py
-
-# Custom configuration
-uv run python scripts/analyze_real_metrics.py --call-graph-index 297 --nrows 1000000 --z-threshold 3.0
+```bibtex
+@article{khan2026eirwr,
+  title         = {{eIRWR}: Enhanced Iterative Random Walk with Restart
+                   for Scalable Root Cause Analysis in Microservices},
+  author        = {Khan, Saiful and Farea, Afrah},
+  journal       = {arXiv preprint arXiv:2608.08073},
+  year          = {2026},
+  eprint        = {2608.08073},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.DC},
+  url           = {https://arxiv.org/abs/2608.08073}
+}
 ```
 
-This generates:
-- `results/rt_distributions.csv` - Per-service response time statistics
-- `results/cpu_distributions.csv` - Per-service CPU/memory statistics
-- `results/real_anomaly_windows.csv` - Detected real anomaly timestamps
-- `results/anomaly_cascades.csv` - Temporal cascade patterns
+## License
 
-### Option 3: Analysis
-
-```sh
-# Regenerate the four figures in paper/figures/ from results/*.csv
-uv run python scripts/make_paper_figures.py
-
-# Ablation study (Table 3 in the paper): PPR vs transpose vs tuned restart vs eIRWR
-uv run python scripts/run_ablation.py --dataset-index 84
-
-# Wilcoxon signed-rank tests + effect sizes (eIRWR vs each baseline)
-uv run python scripts/run_wilcoxon_eirwr.py
-```
-
-## Experiments
-
-The experiment pipeline evaluates the RWR algorithm using a chaos engineering approach:
-
-1. **Graph construction** -- Build the dependency graph from the sampled call records of each topology
-2. **Anomaly injection** -- For each simulated incident, randomly select a root cause node and propagate cascading failures backward through the graph with geometric decay and background noise
-3. **RCA execution** -- Run the iterative RWR to produce a ranked list of root cause candidates
-4. **Evaluation** -- Measure how accurately the algorithm identifies the true root cause
-
-### Evaluation metrics
-
-- **PR@K** (Precision at K): fraction of incidents where the true root cause appears in the top K candidates
-- **MRR** (Mean Reciprocal Rank): average of 1/rank across all incidents (higher is better, max 1.0)
+This project is released under the [MIT License](LICENSE). The Alibaba
+trace dataset is distributed separately under its own terms; see the
+[Alibaba clusterdata repository](https://github.com/alibaba/clusterdata).

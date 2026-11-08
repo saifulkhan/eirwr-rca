@@ -1,19 +1,19 @@
 [project]
 name = "eirwr"
 version = "0.1.0"
-description = ""
+description = "Root cause analysis for microservices with enhanced iterative random walk with restart (eIRWR)"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "ipykernel>=7.2.0",
-    "jinja2>=3.1.6",
+    "joblib>=1.4",
     "matplotlib>=3.10.8",
     "networkx>=3.6.1",
     "pandas>=3.0.1",
-    "ruff>=0.15.7",
     "scipy>=1.17.1",
     "seaborn>=0.13.2",
-    "tqdm>=4.67.3",
 ]
 
 [dependency-groups]
