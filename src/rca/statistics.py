@@ -7,14 +7,11 @@ for paired per-incident comparisons.
 
 from __future__ import annotations
 
-import itertools
-
 import numpy as np
 import pandas as pd
 from scipy.stats import friedmanchisquare, wilcoxon
 
-
-# ── Pairwise Wilcoxon signed-rank ──────────────────────────────────────
+# ── pairwise Wilcoxon signed-rank ──────────────────────────────────────
 
 
 def pairwise_wilcoxon(
@@ -42,7 +39,7 @@ def pairwise_wilcoxon(
     Returns
     -------
     pd.DataFrame with columns [visibility, baseline, statistic, p_value,
-                                effect_size_r, significant_001, significant_005].
+    effect_size_r, significant_001, significant_005].
     """
     rows = []
     visibilities = sorted(per_incident_df["visibility"].unique())
@@ -70,34 +67,40 @@ def pairwise_wilcoxon(
             x = proposed_vals[:n]
             y = baseline_vals[:n]
 
-            # Skip if all differences are zero
+            # skip if all differences are zero
             diffs = x - y
             if np.all(diffs == 0):
-                rows.append({
-                    "visibility": vis,
-                    "baseline": baseline,
-                    "statistic": np.nan,
-                    "p_value": 1.0,
-                    "effect_size_r": 0.0,
-                    "significant_001": False,
-                    "significant_005": False,
-                })
+                rows.append(
+                    {
+                        "visibility": vis,
+                        "baseline": baseline,
+                        "statistic": np.nan,
+                        "p_value": 1.0,
+                        "effect_size_r": 0.0,
+                        "significant_001": False,
+                        "significant_005": False,
+                    }
+                )
                 continue
 
             stat, p = wilcoxon(x, y, alternative=alternative)
-            # Effect size r = Z / sqrt(N)
-            z = abs((stat - n * (n + 1) / 4) / np.sqrt(n * (n + 1) * (2 * n + 1) / 24))
-            r = z / np.sqrt(n)
+            # effect size r = |Z| / sqrt(N), where Z is the tie-corrected
+            # normal approximation and N counts the non-zero differences
+            # (scipy drops zero differences before ranking)
+            z = wilcoxon(x, y, alternative=alternative, method="approx")
+            r = abs(z.zstatistic) / np.sqrt(np.count_nonzero(diffs))
 
-            rows.append({
-                "visibility": vis,
-                "baseline": baseline,
-                "statistic": stat,
-                "p_value": p,
-                "effect_size_r": r,
-                "significant_001": p < 0.001,
-                "significant_005": p < 0.05,
-            })
+            rows.append(
+                {
+                    "visibility": vis,
+                    "baseline": baseline,
+                    "statistic": stat,
+                    "p_value": p,
+                    "effect_size_r": r,
+                    "significant_001": p < 0.001,
+                    "significant_005": p < 0.05,
+                }
+            )
 
     return pd.DataFrame(rows)
 
@@ -131,19 +134,21 @@ def friedman_test(
             )
             groups.append(vals)
 
-        # Align lengths
+        # align lengths
         min_len = min(len(g) for g in groups)
         if min_len < 3:
             continue
         groups = [g[:min_len] for g in groups]
 
         chi2, p = friedmanchisquare(*groups)
-        rows.append({
-            "visibility": vis,
-            "chi2": chi2,
-            "p_value": p,
-            "significant": p < 0.05,
-        })
+        rows.append(
+            {
+                "visibility": vis,
+                "chi2": chi2,
+                "p_value": p,
+                "significant": p < 0.05,
+            }
+        )
 
     return pd.DataFrame(rows)
 
@@ -207,7 +212,7 @@ def compute_effect_sizes(
                 continue
 
             d = cliffs_delta(proposed_vals[:n], baseline_vals[:n])
-            # Magnitude thresholds (Romano et al., 2006)
+            # magnitude thresholds (Romano et al., 2006)
             abs_d = abs(d)
             if abs_d < 0.147:
                 mag = "negligible"
@@ -218,12 +223,14 @@ def compute_effect_sizes(
             else:
                 mag = "large"
 
-            rows.append({
-                "visibility": vis,
-                "baseline": baseline,
-                "cliffs_delta": d,
-                "magnitude": mag,
-            })
+            rows.append(
+                {
+                    "visibility": vis,
+                    "baseline": baseline,
+                    "cliffs_delta": d,
+                    "magnitude": mag,
+                }
+            )
 
     return pd.DataFrame(rows)
 
@@ -240,15 +247,33 @@ def nemenyi_cd(k: int, n: int, alpha: float = 0.05) -> float:
     """
     # q_alpha for alpha=0.05, from Demsar (2006) Table 5
     q_table_005 = {
-        2: 1.960, 3: 2.343, 4: 2.569, 5: 2.728,
-        6: 2.850, 7: 2.949, 8: 3.031, 9: 3.102,
-        10: 3.164, 11: 3.219, 12: 3.268, 13: 3.313,
+        2: 1.960,
+        3: 2.343,
+        4: 2.569,
+        5: 2.728,
+        6: 2.850,
+        7: 2.949,
+        8: 3.031,
+        9: 3.102,
+        10: 3.164,
+        11: 3.219,
+        12: 3.268,
+        13: 3.313,
         14: 3.354,
     }
     q_table_01 = {
-        2: 2.576, 3: 2.913, 4: 3.113, 5: 3.255,
-        6: 3.364, 7: 3.452, 8: 3.526, 9: 3.590,
-        10: 3.646, 11: 3.696, 12: 3.741, 13: 3.781,
+        2: 2.576,
+        3: 2.913,
+        4: 3.113,
+        5: 3.255,
+        6: 3.364,
+        7: 3.452,
+        8: 3.526,
+        9: 3.590,
+        10: 3.646,
+        11: 3.696,
+        12: 3.741,
+        13: 3.781,
         14: 3.818,
     }
     table = q_table_01 if alpha <= 0.01 else q_table_005
@@ -273,9 +298,12 @@ def nemenyi_posthoc(
     for vis in visibilities:
         vis_df = per_incident_df[per_incident_df["visibility"] == vis]
 
-        # Build matrix: incidents x methods
+        # build matrix: incidents x methods
         pivot = vis_df.pivot_table(
-            index="incident_id", columns="method", values=metric, aggfunc="first",
+            index="incident_id",
+            columns="method",
+            values=metric,
+            aggfunc="first",
         )
         available = [m for m in methods if m in pivot.columns]
         pivot = pivot[available].dropna()
@@ -283,7 +311,7 @@ def nemenyi_posthoc(
         if len(pivot) < 3 or len(available) < 2:
             continue
 
-        # Rank methods per incident (lower metric = better = rank 1)
+        # rank methods per incident (lower metric = better = rank 1)
         ranks = pivot.rank(axis=1, method="average")
         avg_ranks = ranks.mean()
 
@@ -292,18 +320,20 @@ def nemenyi_posthoc(
         cd = nemenyi_cd(k, n)
 
         for method in available:
-            rows.append({
-                "visibility": vis,
-                "method": method,
-                "avg_rank": avg_ranks[method],
-                "cd_05": cd,
-                "n_incidents": n,
-            })
+            rows.append(
+                {
+                    "visibility": vis,
+                    "method": method,
+                    "avg_rank": avg_ranks[method],
+                    "cd_05": cd,
+                    "n_incidents": n,
+                }
+            )
 
     return pd.DataFrame(rows)
 
 
-# ── Convenience: run all tests ─────────────────────────────────────────
+# ── convenience: run all tests ─────────────────────────────────────────
 
 
 def run_all_tests(
@@ -317,7 +347,8 @@ def run_all_tests(
     Parameters
     ----------
     per_incident_df : pd.DataFrame
-        Per-incident results with columns [incident_id, visibility, method, rank, ...].
+        Per-incident results with columns
+        [incident_id, visibility, method, rank, ...].
     proposed_methods : list[str], optional
         Methods to test as "proposed". Default: ["eIRWR"].
     baseline_methods : list[str], optional
@@ -339,20 +370,32 @@ def run_all_tests(
     # Friedman omnibus
     results["friedman"] = friedman_test(per_incident_df, all_methods, metric)
 
-    # Pairwise Wilcoxon for each proposed method
+    # pairwise Wilcoxon for each proposed method
     wilcoxon_dfs = []
     effect_dfs = []
     for proposed in proposed_methods:
-        w = pairwise_wilcoxon(per_incident_df, proposed, baseline_methods, metric)
+        w = pairwise_wilcoxon(
+            per_incident_df, proposed, baseline_methods, metric
+        )
         w["proposed"] = proposed
         wilcoxon_dfs.append(w)
 
-        e = compute_effect_sizes(per_incident_df, proposed, baseline_methods, metric)
+        e = compute_effect_sizes(
+            per_incident_df, proposed, baseline_methods, metric
+        )
         e["proposed"] = proposed
         effect_dfs.append(e)
 
-    results["wilcoxon"] = pd.concat(wilcoxon_dfs, ignore_index=True) if wilcoxon_dfs else pd.DataFrame()
-    results["effect_sizes"] = pd.concat(effect_dfs, ignore_index=True) if effect_dfs else pd.DataFrame()
+    results["wilcoxon"] = (
+        pd.concat(wilcoxon_dfs, ignore_index=True)
+        if wilcoxon_dfs
+        else pd.DataFrame()
+    )
+    results["effect_sizes"] = (
+        pd.concat(effect_dfs, ignore_index=True)
+        if effect_dfs
+        else pd.DataFrame()
+    )
 
     # Nemenyi post-hoc
     results["nemenyi"] = nemenyi_posthoc(per_incident_df, all_methods, metric)

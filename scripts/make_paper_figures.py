@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.vis.paper_figures import (  # noqa: E402
     TOPOLOGIES,
+    bootstrap_mrr_ci,
     plot_iterations_vs_alpha,
     plot_mrr_by_topology,
     plot_mrr_vs_visibility,
@@ -58,6 +59,16 @@ def load_mrr_by_topology(visibility: float = 0.3) -> pd.DataFrame:
     return pd.DataFrame(cols)
 
 
+def load_per_incident() -> pd.DataFrame:
+    """Per-incident ranks for all topologies, with a ``topology`` column."""
+    frames = []
+    for i in TOPOLOGIES:
+        df = pd.read_csv(RESULTS / f"per_incident_ranks_CG{i}.csv")
+        df["topology"] = i
+        frames.append(df)
+    return pd.concat(frames, ignore_index=True)
+
+
 def save(fig: plt.Figure, stem: str) -> None:
     fig.savefig(FIGURES / f"{stem}.pdf")
     plt.close(fig)
@@ -68,8 +79,27 @@ def main() -> None:
     set_publication_style()
     FIGURES.mkdir(parents=True, exist_ok=True)
 
-    save(plot_mrr_vs_visibility(load_mean_comparison()), "mrr_vs_visibility")
-    save(plot_mrr_by_topology(load_mrr_by_topology()), "mrr_per_topology")
+    per_incident = load_per_incident()
+
+    # 95% bootstrap CI over incidents, resampled within each topology
+    ci_vis = bootstrap_mrr_ci(
+        per_incident, by=["method", "visibility"], strata="topology"
+    )
+    mean_df = load_mean_comparison().merge(
+        ci_vis[["method", "visibility", "lo", "hi"]],
+        on=["method", "visibility"],
+        how="left",
+    )
+    save(plot_mrr_vs_visibility(mean_df), "mrr_vs_visibility")
+
+    ci_topo = bootstrap_mrr_ci(
+        per_incident[per_incident["visibility"] == 0.3],
+        by=["method", "topology"],
+    )
+    save(
+        plot_mrr_by_topology(load_mrr_by_topology(), ci=ci_topo),
+        "mrr_per_topology",
+    )
     save(
         plot_runtime_memory_scalability(
             pd.read_csv(RESULTS / "computational_metrics.csv")

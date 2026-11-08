@@ -1,10 +1,10 @@
 """
-Baseline RCA methods
+Baseline RCA methods.
 
-Eight baseline approaches from the literature, ranging from
-1. trivial (raw anomaly ranking),
-2. graph-based (PageRank, PPR, CloudRanger),
-3. MicroHECL, TraceDiag, etc.
+Aggregate-metric baselines (MicroRCA/PPR, CloudRanger, In-Degree,
+MicroHECL, TraceDiag, Neighbour Correlation, MonitorRank, Corr-Fusion)
+and the trace-level MicroRank baseline. Each is a re-implementation in
+the spirit of the cited method, operating on the same weight matrix W.
 """
 
 from __future__ import annotations
@@ -12,53 +12,9 @@ from __future__ import annotations
 import numpy as np
 from scipy import sparse
 
-# ── 1: Raw Anomaly ───────────────────────────────────────────
+from src.rca.tracerank import _compute_spectrum_scores
 
-
-def raw_anomaly(s_obs: np.ndarray) -> np.ndarray:
-    """
-    Rank nodes by raw observed anomaly score (no graph).
-
-    Simply returns the anomaly vector as-is. Nodes with the highest
-    observed anomaly score are ranked first. This is the simplest
-    possible baseline -- it ignores the dependency graph entirely.
-    """
-    return s_obs.copy()
-
-
-# ── 2: PageRank ──────────────────────────────────────────────
-
-
-def pagerank(
-    W: sparse.csr_matrix,
-    alpha: float = 0.15,
-    epsilon: float = 1e-6,
-    max_iter: int = 1000,
-) -> np.ndarray:
-    """
-    Standard PageRank on the dependency graph.
-
-    Power iteration: r = (1-alpha) * W @ r + alpha * (1/n).
-    Uses the row-stochastic weight matrix W directly with uniform
-    teleportation. Captures structural importance (highly-connected
-    callees) but is completely anomaly-unaware.
-
-    Reference: Brin & Page (1998).
-    """
-    n = W.shape[0]
-
-    r = np.ones(n) / n
-    teleport = np.ones(n) / n
-
-    for _ in range(max_iter):
-        r_new = (1 - alpha) * W.dot(r) + alpha * teleport
-        if np.abs(r_new - r).sum() < epsilon:
-            return r_new
-        r = r_new
-    return r
-
-
-# ── 3: Personalized PageRank ─────────────────────────────────
+# ── 1: Personalized PageRank ─────────────────────────────────
 
 
 def personalized_pagerank(
@@ -72,12 +28,8 @@ def personalized_pagerank(
     Personalized PageRank (PPR) with anomaly teleport.
 
     Power iteration: r = (1-alpha) * W @ r + alpha * s_obs.
-    Same as our RWR but uses W directly instead of the
-    resilience-modulated fault propagation matrix P.
-
-    This is the approach closest to MicroRCA (Wu et al., NOMS 2020).
-    The key difference: PPR uses W, while our method uses
-    P = (diag(1-R) @ W)^T which modulates by service resilience.
+    This is the MicroRCA baseline (Wu et al., NOMS 2020). Basic IRWR
+    runs the same iteration on M_R = diag(1-R) @ W instead of W.
     """
     r = s_obs.copy()
 
@@ -89,7 +41,7 @@ def personalized_pagerank(
     return r
 
 
-# ── 4: Second-order Random Walk ──────────────────────────────
+# ── 2: second-order Random Walk ──────────────────────────────
 
 
 def second_order_rw(
@@ -139,9 +91,9 @@ def second_order_rw(
         visit_count[current] += 1
 
         for _ in range(walk_length):
-            row = W_csr.getrow(current)
-            neighbors = row.indices
-            weights = np.asarray(row.data).flatten()
+            lo, hi = W_csr.indptr[current], W_csr.indptr[current + 1]
+            neighbors = W_csr.indices[lo:hi]
+            weights = W_csr.data[lo:hi]
 
             if len(neighbors) == 0:
                 break
@@ -161,7 +113,7 @@ def second_order_rw(
     return visit_count
 
 
-# ── 5: In-Degree Centrality ─────────────────────────────────
+# ── 3: in-Degree Centrality ─────────────────────────────────
 
 
 def degree_centrality(W: sparse.csr_matrix) -> np.ndarray:
@@ -177,7 +129,7 @@ def degree_centrality(W: sparse.csr_matrix) -> np.ndarray:
     return in_degree
 
 
-# ── 6: MicroHECL ────────────────────────────────────────────
+# ── 4: MicroHECL ────────────────────────────────────────────
 
 
 def microhecl(
@@ -201,7 +153,7 @@ def microhecl(
     scores = np.zeros(n)
     current = s_obs.copy()
 
-    # Forward propagation: caller -> callee (follow W directly)
+    # forward propagation: caller -> callee (follow W directly)
     for _ in range(max_depth):
         propagated = W.dot(current)
         scores += propagated
@@ -210,7 +162,7 @@ def microhecl(
     return scores
 
 
-# ── 7: TraceDiag ────────────────────────────────────────────
+# ── 5: TraceDiag ────────────────────────────────────────────
 
 
 def tracediag(
@@ -263,7 +215,7 @@ def tracediag(
     return scores
 
 
-# ── 8: Neighbor Correlation ─────────────────────────────────
+# ── 6: neighbor Correlation ─────────────────────────────────
 
 
 def neighbor_correlation(
@@ -290,7 +242,7 @@ def neighbor_correlation(
     return scores
 
 
-# ── 9: MonitorRank ─────────────────────────────────────────
+# ── 7: MonitorRank ─────────────────────────────────────────
 
 
 def monitor_rank(
@@ -311,11 +263,11 @@ def monitor_rank(
     """
     n = W.shape[0]
 
-    # Sparse anomaly-correlated weight matrix
+    # sparse anomaly-correlated weight matrix
     sqrt_s = np.sqrt(np.maximum(s_obs, 0))
     W_corr = sparse.diags(sqrt_s) @ W @ sparse.diags(sqrt_s)
 
-    # Row-normalize
+    # row-normalize
     row_sums = np.asarray(W_corr.sum(axis=1)).flatten()
     row_sums[row_sums == 0] = 1.0
     M = sparse.diags(1.0 / row_sums) @ W_corr
@@ -334,46 +286,17 @@ def monitor_rank(
     return r
 
 
-# ── 10: MicroRank ──────────────────────────────────────────
-
-
-def _ochiai_spectrum(
-    traces: list[dict[int, float]],
-    is_anomalous: np.ndarray,
-    n: int,
-) -> np.ndarray:
-    """Ochiai spectrum scores from disaggregated traces.
-
-    ef[i] = number of failing traces involving service i
-    ep[i] = number of passing traces involving service i
-    score[i] = ef[i] / sqrt((ef[i]+ep[i]) * (ef[i]+nf))
-    """
-    import math
-
-    n_f = int(is_anomalous.sum())
-
-    ef = np.zeros(n, dtype=int)
-    ep = np.zeros(n, dtype=int)
-    for trace, anom in zip(traces, is_anomalous):
-        for svc in trace:
-            if svc < n:
-                if anom:
-                    ef[svc] += 1
-                else:
-                    ep[svc] += 1
-
-    nf = n_f - ef
-    scores = np.zeros(n)
-    for i in range(n):
-        denom = math.sqrt((ef[i] + ep[i]) * (ef[i] + nf[i]))
-        scores[i] = ef[i] / denom if denom > 0 else 0.0
-    return scores
+# ── 8: MicroRank ──────────────────────────────────────────
 
 
 def _normalize_minmax(x: np.ndarray) -> np.ndarray:
     """Min-max normalization to [0, 1]."""
     xmin, xmax = x.min(), x.max()
-    return (x - xmin) / (xmax - xmin) if (xmax - xmin) > 1e-12 else np.zeros_like(x)
+    return (
+        (x - xmin) / (xmax - xmin)
+        if (xmax - xmin) > 1e-12
+        else np.zeros_like(x)
+    )
 
 
 def micro_rank(
@@ -396,11 +319,11 @@ def micro_rank(
     """
     n = W.shape[0]
 
-    # Phase 1: Spectrum scoring
+    # phase 1: Spectrum scoring
     if traces is not None and is_anomalous is not None:
-        spectrum = _ochiai_spectrum(traces, is_anomalous, n)
+        spectrum = _compute_spectrum_scores(traces, is_anomalous, n)
     else:
-        # Approximate spectrum from anomaly vector
+        # approximate spectrum from anomaly vector
         threshold = np.median(s_obs)
         ef = np.where(s_obs > threshold, s_obs, 0.0)
         ep_count = np.where(s_obs <= threshold, 1.0, 0.0)
@@ -408,7 +331,7 @@ def micro_rank(
         denom[denom == 0] = 1.0
         spectrum = ef / denom
 
-    # Phase 2: PageRank with spectrum-weighted teleportation
+    # phase 2: PageRank with spectrum-weighted teleportation
     v = spectrum.copy()
     v_sum = v.sum()
     v = v / v_sum if v_sum > 0 else np.ones(n) / n
@@ -420,11 +343,11 @@ def micro_rank(
             break
         r = r_new
 
-    # Phase 3: Combine spectrum and PageRank scores
+    # phase 3: Combine spectrum and PageRank scores
     return 0.5 * _normalize_minmax(spectrum) + 0.5 * _normalize_minmax(r)
 
 
-# ── 11: CORAL ──────────────────────────────────────────────
+# ── 9: Corr-Fusion (CORAL) ──────────────────────────────────────────────
 
 
 def coral_rca(
@@ -446,19 +369,19 @@ def coral_rca(
     """
     n = W.shape[0]
 
-    # Anomaly-correlation scaling (stays sparse)
+    # anomaly-correlation scaling (stays sparse)
     s_norm = s_obs / s_obs.max() if s_obs.max() > 0 else s_obs.copy()
     C = sparse.diags(s_norm) @ W @ sparse.diags(s_norm)
 
-    # Combined graph: beta * dependency + (1-beta) * correlation
+    # combined graph: beta * dependency + (1-beta) * correlation
     M = beta * W + (1 - beta) * C
 
-    # Row-normalize
+    # row-normalize
     row_sums = np.asarray(M.sum(axis=1)).flatten()
     row_sums[row_sums == 0] = 1.0
     M = sparse.diags(1.0 / row_sums) @ M
 
-    # Random walk with anomaly teleport
+    # random walk with anomaly teleport
     v = s_obs.copy()
     v_sum = v.sum()
     v = v / v_sum if v_sum > 0 else np.ones(n) / n

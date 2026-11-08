@@ -1,19 +1,32 @@
-"""
-Comprehensive RCA Performance Evaluation Script.
+"""Run the experiments reported in the paper.
 
-Consolidates experiments from:
-  - notebook/performance/performance.ipynb
-  - notebook/performance/dataset-sensitivity.ipynb
-  - notebook/performance/computational.ipynb
+Experiments (select with ``--experiments``):
 
-Evaluates proposed methods (IRWR, eIRWR) against baselines
-across multiple dataset sizes and visibility levels. Saves all metrics
-to CSV files in results/.
+  comparison   Simulated incidents on each topology, all methods.
+               Writes per_incident_ranks_CG{i}.csv and
+               full_comparison_metrics_CG{i}.csv (Table main-results,
+               Figs. mrr-visibility and per-topology), plus
+               multi_topology_metrics.csv when several topologies run.
+  compute      Runtime and peak memory vs graph size on prefixes of the
+               primary topology (Table computational, Fig. scalability).
+               Methods are timed one at a time, never in parallel.
+  convergence  IRWR/eIRWR iterations vs restart probability
+               (Fig. convergence).
+  stats        Friedman, Wilcoxon and Cliff's delta on the per-incident
+               ranks of the primary topology (Table wilcoxon).
+  real         Label-free evaluation on real anomaly windows
+               (Table real-world). Run scripts/analyze_real_metrics.py
+               first.
+
+Every method sees the same incidents. The root causes come from
+``default_rng(seed)`` and the noise of incident ``i`` from
+``default_rng(seed * 100000 + i)``, so results do not depend on
+``--n-jobs``.
 
 Usage:
-    python scripts/evaluate_performance.py
-    python scripts/evaluate_performance.py --n-incidents 50 --quick
-    python scripts/evaluate_performance.py --dataset-index 297
+    uv run python scripts/evaluate_performance.py
+    uv run python scripts/evaluate_performance.py --experiments comparison
+    uv run python scripts/evaluate_performance.py --quick --n-jobs 8
 """
 
 from __future__ import annotations
@@ -26,13 +39,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
-# Ensure project root is importable
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.loader import load_call_graph_by_index
-from src.rca.baselines import (
+from src.loader import DATA_ROOT, load_call_graph_by_index  # noqa: E402
+from src.rca.baselines import (  # noqa: E402
     coral_rca,
     degree_centrality,
     micro_rank,
@@ -43,13 +56,13 @@ from src.rca.baselines import (
     second_order_rw,
     tracediag,
 )
-from src.rca.graph import (
+from src.rca.graph import (  # noqa: E402
     build_dependency_graph,
     compute_fault_propagation_matrix,
     compute_weight_matrix,
 )
-from src.rca.irwr import irwr, irwr_enhanced
-from src.rca.metrics import (
+from src.rca.irwr import irwr, irwr_enhanced  # noqa: E402
+from src.rca.metrics import (  # noqa: E402
     average_precision,
     get_rank,
     mean_reciprocal_rank,
@@ -57,33 +70,49 @@ from src.rca.metrics import (
     precision_at_k_value,
     recall_at_k,
 )
-from src.rca.simulation import simulate_anomaly
-from src.rca.tracerank import simulate_trace_data, tracerank
+from src.rca.simulation import simulate_anomaly  # noqa: E402
+from src.rca.tracerank import simulate_trace_data, tracerank  # noqa: E402
 
 RESULTS_DIR = PROJECT_ROOT / "results"
-RESULTS_DIR.mkdir(exist_ok=True)
+
+# "CORAL" is shown as "Corr-Fusion" in the paper
+ALL_METHODS = [
+    "MicroRCA",
+    "CloudRanger",
+    "In-Degree",
+    "MicroHECL",
+    "TraceDiag",
+    "Neighbor Corr.",
+    "MonitorRank",
+    "MicroRank",
+    "CORAL",
+    "TraceRank",
+    "IRWR",
+    "eIRWR",
+]
+# trace-level methods consume traces simulated from the true root cause,
+# so they cannot run on real anomaly windows
+TRACE_METHODS = {"MicroRank", "TraceRank"}
+
+R_BASE = 0.1
+ALPHA = 0.15
 
 
-# ── Helper functions ─────────────────────────────────────────────────────
+# ── helpers ─────────────────────────────────────────────────────────────
 
 
 def prepare_graph(dataset_index: int, nrows: int | None = None) -> dict:
-    """Load dataset and build graph structures."""
+    """Load a CallGraph file and build W and M_R = diag(1-R) W."""
     df = load_call_graph_by_index(dataset_index, nrows=nrows)
     nodes, edges_df = build_dependency_graph(df)
     W = compute_weight_matrix(edges_df, nodes)
-    P = compute_fault_propagation_matrix(W, R=0.1)
-    P_T = P.T.tocsr()
-    callee_indices = sorted(
-        {nodes.index(dm) for dm in edges_df["dm"].unique() if dm in nodes}
-    )
+    M_R = compute_fault_propagation_matrix(W, R=R_BASE).T.tocsr()
+    node_to_idx = {name: i for i, name in enumerate(nodes)}
+    callee_indices = sorted(node_to_idx[dm] for dm in edges_df["dm"].unique())
     return {
-        "df": df,
         "nodes": nodes,
-        "edges_df": edges_df,
         "W": W,
-        "P": P,
-        "P_T": P_T,
+        "M_R": M_R,
         "callee_indices": callee_indices,
         "n_rows": len(df),
         "n_nodes": len(nodes),
@@ -91,52 +120,200 @@ def prepare_graph(dataset_index: int, nrows: int | None = None) -> dict:
     }
 
 
-def compute_all_metrics(ranked: np.ndarray, root_idx: int) -> dict[str, float]:
-    """Compute full metric suite for a single incident."""
-    rank = get_rank(ranked, root_idx)
+def graph_meta(graph: dict, dataset_index: int) -> dict:
     return {
-        "rank": rank,
-        "PR@1": precision_at_k(ranked, root_idx, 1),
-        "PR@3": precision_at_k(ranked, root_idx, 3),
-        "PR@5": precision_at_k(ranked, root_idx, 5),
-        "Precision@1": precision_at_k_value(ranked, root_idx, 1),
-        "Precision@3": precision_at_k_value(ranked, root_idx, 3),
-        "Precision@5": precision_at_k_value(ranked, root_idx, 5),
-        "Recall@1": recall_at_k(ranked, root_idx, 1),
-        "Recall@3": recall_at_k(ranked, root_idx, 3),
-        "Recall@5": recall_at_k(ranked, root_idx, 5),
-        "AP": average_precision(ranked, root_idx),
+        "dataset_index": dataset_index,
+        "n_rows": graph["n_rows"],
+        "n_nodes": graph["n_nodes"],
+        "n_edges": graph["n_edges"],
     }
 
 
-def aggregate_metrics(all_incident_metrics: list[dict]) -> dict[str, float]:
-    """Aggregate per-incident metrics into summary statistics."""
-    ranks = [m["rank"] for m in all_incident_metrics]
-    return {
-        "PR@1": np.mean([m["PR@1"] for m in all_incident_metrics]),
-        "PR@3": np.mean([m["PR@3"] for m in all_incident_metrics]),
-        "PR@5": np.mean([m["PR@5"] for m in all_incident_metrics]),
-        "Precision@1": np.mean(
-            [m["Precision@1"] for m in all_incident_metrics]
-        ),
-        "Precision@3": np.mean(
-            [m["Precision@3"] for m in all_incident_metrics]
-        ),
-        "Precision@5": np.mean(
-            [m["Precision@5"] for m in all_incident_metrics]
-        ),
-        "Recall@1": np.mean([m["Recall@1"] for m in all_incident_metrics]),
-        "Recall@3": np.mean([m["Recall@3"] for m in all_incident_metrics]),
-        "Recall@5": np.mean([m["Recall@5"] for m in all_incident_metrics]),
-        "MRR": mean_reciprocal_rank(ranks),
-        "MAP": np.mean([m["AP"] for m in all_incident_metrics]),
-        "avg_rank": np.mean(ranks),
-        "median_rank": np.median(ranks),
-    }
+def compute_all_metrics(ranked: np.ndarray, root_idx: int) -> dict:
+    """Metric suite for one incident."""
+    out: dict = {"rank": get_rank(ranked, root_idx)}
+    for k in (1, 3, 5):
+        out[f"PR@{k}"] = precision_at_k(ranked, root_idx, k)
+    for k in (1, 3, 5):
+        out[f"Precision@{k}"] = precision_at_k_value(ranked, root_idx, k)
+    for k in (1, 3, 5):
+        out[f"Recall@{k}"] = recall_at_k(ranked, root_idx, k)
+    out["AP"] = average_precision(ranked, root_idx)
+    return out
 
 
-def bench_time(fn, n_repeats: int = 10) -> tuple[float, float]:
-    """Return (mean_seconds, std_seconds)."""
+def aggregate_metrics(incidents: pd.DataFrame) -> dict:
+    """Average per-incident metrics of one (visibility, method) group."""
+    cols = [
+        f"{m}@{k}" for m in ("PR", "Precision", "Recall") for k in (1, 3, 5)
+    ]
+    out = {c: incidents[c].mean() for c in cols}
+    out["MRR"] = mean_reciprocal_rank(incidents["rank"].tolist())
+    out["MAP"] = incidents["AP"].mean()
+    out["avg_rank"] = incidents["rank"].mean()
+    out["median_rank"] = incidents["rank"].median()
+    return out
+
+
+def run_method(
+    method: str,
+    W,
+    M_R,
+    s_obs: np.ndarray,
+    root_idx: int,
+    visibility: float,
+    seed: int,
+    incident_idx: int,
+) -> np.ndarray:
+    """Run one RCA method and return its score vector."""
+    if method == "MicroRCA":
+        return personalized_pagerank(W, s_obs, alpha=ALPHA)
+    if method == "CloudRanger":
+        n_walks = 50000 if W.shape[0] > 10000 else 10000
+        return second_order_rw(
+            W,
+            s_obs,
+            n_walks=n_walks,
+            walk_length=20,
+            rng=np.random.default_rng(seed * 10000 + incident_idx),
+        )
+    if method == "In-Degree":
+        return degree_centrality(W)
+    if method == "MicroHECL":
+        return microhecl(W, s_obs)
+    if method == "TraceDiag":
+        return tracediag(W, s_obs)
+    if method == "Neighbor Corr.":
+        return neighbor_correlation(W, s_obs)
+    if method == "MonitorRank":
+        return monitor_rank(W, s_obs)
+    if method == "CORAL":
+        return coral_rca(W, s_obs)
+    if method == "IRWR":
+        return irwr(M_R, s_obs, alpha=ALPHA)[0]
+    if method == "eIRWR":
+        return irwr_enhanced(W, s_obs)[0]
+    if method in TRACE_METHODS:
+        traces, is_anom, fe_idx = simulate_trace_data(
+            W,
+            root_idx,
+            root_cause_visibility=visibility,
+            rng=np.random.default_rng(seed * 10000 + incident_idx),
+        )
+        if method == "TraceRank":
+            return tracerank(W, traces, is_anom, frontend_idx=fe_idx)
+        return micro_rank(W, s_obs, traces, is_anom)
+    raise ValueError(f"Unknown method: {method}")
+
+
+# ── comparison on simulated incidents ──────────────────────────────────
+
+
+def _run_incident(
+    methods: list[str],
+    graph: dict,
+    root_idx: int,
+    vis: float,
+    seed: int,
+    incident_idx: int,
+) -> list[dict]:
+    """Simulate one incident and rank it with every method."""
+    rng = np.random.default_rng(seed * 100000 + incident_idx)
+    s_obs = simulate_anomaly(
+        graph["W"],
+        root_idx,
+        propagation_steps=5,
+        decay=0.6,
+        noise_level=0.05,
+        root_cause_visibility=vis,
+        rng=rng,
+    )
+    records = []
+    for method in methods:
+        scores = run_method(
+            method,
+            graph["W"],
+            graph["M_R"],
+            s_obs,
+            root_idx,
+            vis,
+            seed,
+            incident_idx,
+        )
+        records.append(
+            {
+                "incident_id": incident_idx,
+                "visibility": vis,
+                "method": method,
+                "root_cause_idx": root_idx,
+                "root_cause_node": graph["nodes"][root_idx],
+                **compute_all_metrics(np.argsort(-scores), root_idx),
+            }
+        )
+    return records
+
+
+def experiment_comparison(
+    dataset_index: int,
+    visibilities: list[float],
+    methods: list[str],
+    n_incidents: int,
+    seed: int,
+    n_jobs: int,
+) -> pd.DataFrame:
+    """All methods on simulated incidents over the full topology."""
+    print(f"\n{'=' * 70}\nCOMPARISON: CallGraph_{dataset_index}\n{'=' * 70}")
+    t0 = time.time()
+    graph = prepare_graph(dataset_index)
+    print(
+        f"  {graph['n_nodes']:,} nodes, {graph['n_edges']:,} edges"
+        f" ({time.time() - t0:.1f}s)"
+    )
+
+    per_incident = []
+    for vis in visibilities:
+        t0 = time.time()
+        rng = np.random.default_rng(seed)
+        roots = [
+            rng.choice(graph["callee_indices"]) for _ in range(n_incidents)
+        ]
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_run_incident)(methods, graph, root, vis, seed, i)
+            for i, root in enumerate(roots)
+        )
+        per_incident.extend(rec for recs in results for rec in recs)
+        print(f"  vis={vis:.2f}: {time.time() - t0:.1f}s")
+
+    per_df = pd.DataFrame(per_incident)
+    per_df.to_csv(
+        RESULTS_DIR / f"per_incident_ranks_CG{dataset_index}.csv", index=False
+    )
+
+    summary = []
+    for (vis, method), grp in per_df.groupby(
+        ["visibility", "method"], sort=False
+    ):
+        summary.append(
+            {
+                "visibility": vis,
+                "method": method,
+                "n_incidents": len(grp),
+                **aggregate_metrics(grp),
+                **graph_meta(graph, dataset_index),
+            }
+        )
+    summary_df = pd.DataFrame(summary)
+    out = RESULTS_DIR / f"full_comparison_metrics_CG{dataset_index}.csv"
+    summary_df.to_csv(out, index=False)
+    print(f"  Saved: {out}")
+    return summary_df
+
+
+# ── computational cost ─────────────────────────────────────────────────
+
+
+def bench_time(fn, n_repeats: int) -> tuple[float, float]:
+    """Return (mean, std) wall-clock seconds over ``n_repeats`` calls."""
     times = []
     for _ in range(n_repeats):
         t0 = time.perf_counter()
@@ -146,7 +323,7 @@ def bench_time(fn, n_repeats: int = 10) -> tuple[float, float]:
 
 
 def bench_memory(fn) -> int:
-    """Return peak memory (bytes) during fn()."""
+    """Return peak traced memory (bytes) during one call of ``fn``."""
     tracemalloc.start()
     fn()
     _, peak = tracemalloc.get_traced_memory()
@@ -154,867 +331,350 @@ def bench_memory(fn) -> int:
     return peak
 
 
-# ── Method runners ───────────────────────────────────────────────────────
-
-
-def run_method(
-    method_name: str,
-    W,
-    P_T,
-    s_obs: np.ndarray,
-    root_idx: int,
-    visibility: float,
-    seed: int,
-    incident_idx: int,
-) -> np.ndarray:
-    """Run a single RCA method and return scores array."""
-    if method_name == "MicroRCA":
-        return personalized_pagerank(W, s_obs)
-    elif method_name == "CloudRanger":
-        # Use 50K walks for large graphs (>10K nodes), 10K for smaller graphs
-        n_nodes = W.shape[0]
-        n_walks = 50000 if n_nodes > 10000 else 10000
-        return second_order_rw(
+def _bench_fns(W, M_R, s_obs, traces, is_anom, fe_idx) -> dict:
+    """Zero-argument callables, one per method, for benchmarking."""
+    n_walks = 50000 if W.shape[0] > 10000 else 10000
+    return {
+        "MicroRCA": lambda: personalized_pagerank(W, s_obs, alpha=ALPHA),
+        "CloudRanger": lambda: second_order_rw(
             W,
             s_obs,
             n_walks=n_walks,
             walk_length=20,
-            rng=np.random.default_rng(seed * 10000 + incident_idx),
-        )
-    elif method_name == "In-Degree":
-        return degree_centrality(W)
-    elif method_name == "MicroHECL":
-        return microhecl(W, s_obs)
-    elif method_name == "TraceDiag":
-        return tracediag(W, s_obs)
-    elif method_name == "Neighbor Corr.":
-        return neighbor_correlation(W, s_obs)
-    elif method_name == "IRWR":
-        r, _ = irwr(P_T, s_obs, alpha=0.15)
-        return r
-    elif method_name == "eIRWR":
-        r, _ = irwr_enhanced(W, s_obs)
-        return r
-    elif method_name == "TraceRank":
-        tr_rng = np.random.default_rng(seed * 10000 + incident_idx)
-        traces, is_anom, fe_idx = simulate_trace_data(
-            W,
-            root_idx,
-            root_cause_visibility=visibility,
-            rng=tr_rng,
-        )
-        return tracerank(W, traces, is_anom, frontend_idx=fe_idx)
-    elif method_name == "MonitorRank":
-        return monitor_rank(W, s_obs)
-    elif method_name == "MicroRank":
-        tr_rng = np.random.default_rng(seed * 10000 + incident_idx)
-        traces, is_anom, fe_idx = simulate_trace_data(
-            W,
-            root_idx,
-            root_cause_visibility=visibility,
-            rng=tr_rng,
-        )
-        return micro_rank(W, s_obs, traces, is_anom)
-    elif method_name == "CORAL":
-        return coral_rca(W, s_obs)
-    else:
-        raise ValueError(f"Unknown method: {method_name}")
+            rng=np.random.default_rng(0),
+        ),
+        "In-Degree": lambda: degree_centrality(W),
+        "MicroHECL": lambda: microhecl(W, s_obs),
+        "TraceDiag": lambda: tracediag(W, s_obs),
+        "Neighbor Corr.": lambda: neighbor_correlation(W, s_obs),
+        "MonitorRank": lambda: monitor_rank(W, s_obs),
+        "MicroRank": lambda: micro_rank(W, s_obs, traces, is_anom),
+        "CORAL": lambda: coral_rca(W, s_obs),
+        "TraceRank": lambda: tracerank(W, traces, is_anom, frontend_idx=fe_idx),
+        "IRWR": lambda: irwr(M_R, s_obs, alpha=ALPHA),
+        "eIRWR": lambda: irwr_enhanced(W, s_obs),
+    }
 
 
-# ── Experiment 1: Scale × Visibility ────────────────────────────────────
-
-
-def experiment_scale_visibility(
+def experiment_compute(
     dataset_index: int,
-    nrows_list: list[int | None],
-    visibilities: list[float],
+    nrows_list: list[int],
     methods: list[str],
-    n_incidents: int,
     seed: int,
+    n_repeats: int = 5,
 ) -> pd.DataFrame:
-    """Evaluate all methods across dataset sizes and visibility levels."""
-    print("=" * 70)
-    print("EXPERIMENT 1: Scale × Visibility Performance")
-    print("=" * 70)
-
-    results = []
-
-    for nrows in nrows_list:
-        label = f"{nrows // 1000}K" if nrows else "FULL"
-        print(f"\n{'─' * 60}")
-        print(f"  Dataset: CallGraph_{dataset_index}, nrows={label}")
-        t0 = time.time()
-        graph = prepare_graph(dataset_index, nrows=nrows)
-        print(
-            f"  Graph: {graph['n_nodes']:,} nodes, {graph['n_edges']:,} edges"
-            f" ({time.time() - t0:.1f}s)"
-        )
-
-        for vis in visibilities:
-            rng = np.random.default_rng(seed)
-            method_incidents: dict[str, list[dict]] = {m: [] for m in methods}
-
-            t0 = time.time()
-            for i_inc in range(n_incidents):
-                root_idx = rng.choice(graph["callee_indices"])
-                s_obs = simulate_anomaly(
-                    graph["W"],
-                    root_idx,
-                    propagation_steps=5,
-                    decay=0.6,
-                    noise_level=0.05,
-                    root_cause_visibility=vis,
-                    rng=rng,
-                )
-
-                for method in methods:
-                    scores = run_method(
-                        method,
-                        graph["W"],
-                        graph["P_T"],
-                        s_obs,
-                        root_idx,
-                        vis,
-                        seed,
-                        i_inc,
-                    )
-                    ranked = np.argsort(-scores)
-                    metrics = compute_all_metrics(ranked, root_idx)
-                    method_incidents[method].append(metrics)
-
-            elapsed = time.time() - t0
-
-            for method in methods:
-                agg = aggregate_metrics(method_incidents[method])
-                results.append(
-                    {
-                        "dataset_index": dataset_index,
-                        "nrows": nrows or graph["n_rows"],
-                        "n_nodes": graph["n_nodes"],
-                        "n_edges": graph["n_edges"],
-                        "visibility": vis,
-                        "method": method,
-                        "n_incidents": n_incidents,
-                        **agg,
-                    }
-                )
-
-            print(f"    vis={vis:.2f}: {elapsed:.1f}s")
-
-    df = pd.DataFrame(results)
-    out = RESULTS_DIR / "scale_visibility_metrics.csv"
-    df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
-    return df
-
-
-# ── Experiment 2: Full comparison on large dataset ──────────────────────
-
-
-def experiment_full_comparison(
-    dataset_index: int,
-    visibilities: list[float],
-    methods: list[str],
-    n_incidents: int,
-    seed: int,
-) -> pd.DataFrame:
-    """Full comparison on the largest dataset (all rows)."""
-    print("\n" + "=" * 70)
-    print("EXPERIMENT 2: Full Comparison on Large Dataset")
-    print("=" * 70)
-
-    t0 = time.time()
-    graph = prepare_graph(dataset_index, nrows=None)
-    print(
-        f"  Full graph: {graph['n_nodes']:,} nodes, {graph['n_edges']:,} edges"
-        f" ({time.time() - t0:.1f}s)"
-    )
-
-    results = []
-
-    for vis in visibilities:
-        rng = np.random.default_rng(seed)
-        method_incidents: dict[str, list[dict]] = {m: [] for m in methods}
-
-        t0 = time.time()
-        for i_inc in range(n_incidents):
-            root_idx = rng.choice(graph["callee_indices"])
-            s_obs = simulate_anomaly(
-                graph["W"],
-                root_idx,
-                propagation_steps=5,
-                decay=0.6,
-                noise_level=0.05,
-                root_cause_visibility=vis,
-                rng=rng,
-            )
-
-            for method in methods:
-                scores = run_method(
-                    method,
-                    graph["W"],
-                    graph["P_T"],
-                    s_obs,
-                    root_idx,
-                    vis,
-                    seed,
-                    i_inc,
-                )
-                ranked = np.argsort(-scores)
-                metrics = compute_all_metrics(ranked, root_idx)
-                method_incidents[method].append(metrics)
-
-        elapsed = time.time() - t0
-
-        for method in methods:
-            agg = aggregate_metrics(method_incidents[method])
-            results.append(
-                {
-                    "dataset_index": dataset_index,
-                    "n_rows": graph["n_rows"],
-                    "n_nodes": graph["n_nodes"],
-                    "n_edges": graph["n_edges"],
-                    "visibility": vis,
-                    "method": method,
-                    "n_incidents": n_incidents,
-                    **agg,
-                }
-            )
-
-        print(f"  vis={vis:.2f}: {elapsed:.1f}s")
-
-    df = pd.DataFrame(results)
-    out = RESULTS_DIR / "full_comparison_metrics.csv"
-    df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
-    return df
-
-
-# ── Experiment 3: Computational Benchmarks ──────────────────────────────
-
-
-def experiment_computational(
-    dataset_index: int,
-    nrows_list: list[int | None],
-    seed: int,
-    n_time_repeats: int = 5,
-) -> pd.DataFrame:
-    """Measure wall-clock time and peak memory for each method."""
-    print("\n" + "=" * 70)
-    print("EXPERIMENT 3: Computational Benchmarks")
-    print("=" * 70)
-
+    """Runtime and peak memory per method on growing graph prefixes."""
+    print(f"\n{'=' * 70}\nCOMPUTE: CallGraph_{dataset_index}\n{'=' * 70}")
     records = []
-
     for nrows in nrows_list:
-        label = f"{nrows // 1000}K" if nrows else "FULL"
-        print(f"\n  nrows={label}...")
         graph = prepare_graph(dataset_index, nrows=nrows)
-        W = graph["W"]
-        P_T = graph["P_T"]
-        n_nodes = graph["n_nodes"]
-        n_edges = graph["n_edges"]
+        W, M_R = graph["W"], graph["M_R"]
+        print(f"\n  nrows={nrows:,}: {graph['n_nodes']:,} nodes")
 
         rng = np.random.default_rng(seed)
         root_idx = rng.choice(graph["callee_indices"])
         s_obs = simulate_anomaly(
-            W,
-            root_idx,
-            root_cause_visibility=0.3,
-            rng=rng,
+            W, root_idx, root_cause_visibility=0.3, rng=rng
         )
-
-        # Pre-generate trace data for TraceRank
-        tr_rng = np.random.default_rng(seed)
-        tr_traces, tr_is_anom, tr_fe_idx = simulate_trace_data(
-            W,
-            root_idx,
-            rng=tr_rng,
+        traces, is_anom, fe_idx = simulate_trace_data(
+            W, root_idx, rng=np.random.default_rng(seed)
         )
-
-        # Determine n_walks based on graph size
-        n_nodes = W.shape[0]
-        cloudranger_walks = 50000 if n_nodes > 10000 else 10000
-
-        bench_methods = {
-            "MicroRCA": lambda: personalized_pagerank(W, s_obs),
-            "CloudRanger": lambda: second_order_rw(
-                W,
-                s_obs,
-                n_walks=cloudranger_walks,
-                walk_length=20,
-                rng=np.random.default_rng(0),
-            ),
-            "In-Degree": lambda: degree_centrality(W),
-            "MicroHECL": lambda: microhecl(W, s_obs),
-            "TraceDiag": lambda: tracediag(W, s_obs),
-            "Neighbor Corr.": lambda: neighbor_correlation(W, s_obs),
-            "IRWR": lambda: irwr(P_T, s_obs, alpha=0.15),
-            "eIRWR": lambda: irwr_enhanced(W, s_obs),
-            "TraceRank": lambda: tracerank(
-                W,
-                tr_traces,
-                tr_is_anom,
-                frontend_idx=tr_fe_idx,
-            ),
-            "MonitorRank": lambda: monitor_rank(W, s_obs),
-            "MicroRank": lambda: micro_rank(W, s_obs, tr_traces, tr_is_anom),
-            "CORAL": lambda: coral_rca(W, s_obs),
-        }
-
-        for method_name, fn in bench_methods.items():
-            n_rep = 3 if method_name == "CloudRanger" else n_time_repeats
-            mean_t, std_t = bench_time(fn, n_repeats=n_rep)
-            peak_mem = bench_memory(fn)
-
+        bench = _bench_fns(W, M_R, s_obs, traces, is_anom, fe_idx)
+        for method in methods:
+            fn = bench[method]
+            reps = 3 if method == "CloudRanger" else n_repeats
+            mean_t, std_t = bench_time(fn, reps)
+            peak = bench_memory(fn)
             records.append(
                 {
                     "dataset_index": dataset_index,
-                    "nrows": nrows or graph["n_rows"],
-                    "n_nodes": n_nodes,
-                    "n_edges": n_edges,
-                    "method": method_name,
+                    "nrows": nrows,
+                    "n_nodes": graph["n_nodes"],
+                    "n_edges": graph["n_edges"],
+                    "method": method,
                     "mean_time_s": mean_t,
                     "std_time_s": std_t,
-                    "peak_memory_bytes": peak_mem,
-                    "peak_memory_mb": peak_mem / (1024 * 1024),
+                    "peak_memory_bytes": peak,
+                    "peak_memory_mb": peak / (1024 * 1024),
                 }
             )
             print(
-                f"    {method_name:20s}  "
-                f"time={mean_t * 1000:8.2f}ms  "
-                f"mem={peak_mem / 1024:8.1f}KB"
+                f"    {method:15s} time={mean_t * 1000:10.2f} ms"
+                f"  mem={peak / 1024**2:8.2f} MB"
             )
 
     df = pd.DataFrame(records)
     out = RESULTS_DIR / "computational_metrics.csv"
     df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
+    print(f"\n  Saved: {out}")
     return df
 
 
-# ── Experiment 4: Convergence Analysis ──────────────────────────────────
+# ── convergence ────────────────────────────────────────────────────────
 
 
 def experiment_convergence(
     dataset_index: int,
-    nrows_list: list[int | None],
+    nrows_list: list[int],
     alphas: list[float],
     seed: int,
     n_trials: int = 20,
 ) -> pd.DataFrame:
-    """Measure convergence (iterations) vs alpha and graph size."""
-    print("\n" + "=" * 70)
-    print("EXPERIMENT 4: Convergence Analysis")
-    print("=" * 70)
-
+    """Iterations to convergence of IRWR and eIRWR vs restart alpha."""
+    print(f"\n{'=' * 70}\nCONVERGENCE: CallGraph_{dataset_index}\n{'=' * 70}")
     records = []
-
     for nrows in nrows_list:
-        label = f"{nrows // 1000}K" if nrows else "FULL"
-        print(f"\n  nrows={label}...")
         graph = prepare_graph(dataset_index, nrows=nrows)
-        W = graph["W"]
-
+        W, M_R = graph["W"], graph["M_R"]
+        print(f"\n  nrows={nrows:,}: {graph['n_nodes']:,} nodes")
         for alpha in alphas:
             rng = np.random.default_rng(seed)
-            irwr_iters = []
-            eirwr_iters = []
-
+            iters: dict[str, list[int]] = {"IRWR": [], "eIRWR": []}
             for _ in range(n_trials):
                 root_idx = rng.choice(graph["callee_indices"])
                 s_obs = simulate_anomaly(
-                    W,
-                    root_idx,
-                    root_cause_visibility=0.3,
-                    rng=rng,
+                    W, root_idx, root_cause_visibility=0.3, rng=rng
                 )
-
-                P = compute_fault_propagation_matrix(W, R=0.1)
-                P_T = P.T.tocsr()
-
-                _, k1 = irwr(P_T, s_obs, alpha=alpha)
-                irwr_iters.append(k1)
-
-                _, k2 = irwr_enhanced(W, s_obs, alpha=alpha)
-                eirwr_iters.append(k2)
-
-            records.append(
-                {
-                    "dataset_index": dataset_index,
-                    "nrows": nrows or graph["n_rows"],
-                    "n_nodes": graph["n_nodes"],
-                    "n_edges": graph["n_edges"],
-                    "alpha": alpha,
-                    "method": "IRWR",
-                    "mean_iters": np.mean(irwr_iters),
-                    "std_iters": np.std(irwr_iters),
-                    "max_iters": np.max(irwr_iters),
-                    "min_iters": np.min(irwr_iters),
-                }
-            )
-            records.append(
-                {
-                    "dataset_index": dataset_index,
-                    "nrows": nrows or graph["n_rows"],
-                    "n_nodes": graph["n_nodes"],
-                    "n_edges": graph["n_edges"],
-                    "alpha": alpha,
-                    "method": "eIRWR",
-                    "mean_iters": np.mean(eirwr_iters),
-                    "std_iters": np.std(eirwr_iters),
-                    "max_iters": np.max(eirwr_iters),
-                    "min_iters": np.min(eirwr_iters),
-                }
-            )
-
+                iters["IRWR"].append(irwr(M_R, s_obs, alpha=alpha)[1])
+                iters["eIRWR"].append(irwr_enhanced(W, s_obs, alpha=alpha)[1])
+            for method, its in iters.items():
+                records.append(
+                    {
+                        "dataset_index": dataset_index,
+                        "nrows": nrows,
+                        "n_nodes": graph["n_nodes"],
+                        "n_edges": graph["n_edges"],
+                        "alpha": alpha,
+                        "method": method,
+                        "mean_iters": np.mean(its),
+                        "std_iters": np.std(its),
+                        "max_iters": np.max(its),
+                        "min_iters": np.min(its),
+                    }
+                )
             print(
-                f"    alpha={alpha:.2f}: "
-                f"IRWR={np.mean(irwr_iters):.1f}iters, "
-                f"eIRWR={np.mean(eirwr_iters):.1f}iters"
+                f"    alpha={alpha:.2f}: IRWR={np.mean(iters['IRWR']):.1f}, "
+                f"eIRWR={np.mean(iters['eIRWR']):.1f} iterations"
             )
 
     df = pd.DataFrame(records)
     out = RESULTS_DIR / "convergence_metrics.csv"
     df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
+    print(f"\n  Saved: {out}")
     return df
 
 
-# ── Experiment 5: Per-Incident Detail (for statistical analysis) ────────
+# ── statistical tests ──────────────────────────────────────────────────
 
 
-def experiment_per_incident(
+def experiment_stats(dataset_index: int) -> None:
+    """Friedman, Wilcoxon and Cliff's delta on per-incident ranks."""
+    from src.rca.statistics import run_all_tests
+
+    print(f"\n{'=' * 70}\nSTATS: CallGraph_{dataset_index}\n{'=' * 70}")
+    path = RESULTS_DIR / f"per_incident_ranks_CG{dataset_index}.csv"
+    if not path.exists():
+        print(f"  ERROR: {path} not found. Run the comparison first.")
+        return
+    df = pd.read_csv(path)
+    for name, res in run_all_tests(df).items():
+        out = RESULTS_DIR / f"statistical_{name}.csv"
+        res.to_csv(out, index=False)
+        print(f"  Saved: {out}")
+        if name == "wilcoxon":
+            cols = ["baseline", "p_value", "effect_size_r"]
+            print(res[res["visibility"] == 0.3][cols].to_string(index=False))
+
+
+# ── real anomaly windows ───────────────────────────────────────────────
+
+
+def experiment_real(
     dataset_index: int,
-    visibilities: list[float],
     methods: list[str],
-    n_incidents: int,
     seed: int,
-) -> pd.DataFrame:
-    """Save per-incident ranks for statistical tests (Wilcoxon, etc.)."""
-    print("\n" + "=" * 70)
-    print("EXPERIMENT 5: Per-Incident Ranks (for statistical tests)")
-    print("=" * 70)
-
-    t0 = time.time()
-    graph = prepare_graph(dataset_index, nrows=None)
-    print(
-        f"  Full graph: {graph['n_nodes']:,} nodes, {graph['n_edges']:,} edges"
-        f" ({time.time() - t0:.1f}s)"
-    )
-
-    records = []
-
-    for vis in visibilities:
-        rng = np.random.default_rng(seed)
-
-        t0 = time.time()
-        for i_inc in range(n_incidents):
-            root_idx = rng.choice(graph["callee_indices"])
-            s_obs = simulate_anomaly(
-                graph["W"],
-                root_idx,
-                propagation_steps=5,
-                decay=0.6,
-                noise_level=0.05,
-                root_cause_visibility=vis,
-                rng=rng,
-            )
-
-            for method in methods:
-                scores = run_method(
-                    method,
-                    graph["W"],
-                    graph["P_T"],
-                    s_obs,
-                    root_idx,
-                    vis,
-                    seed,
-                    i_inc,
-                )
-                ranked = np.argsort(-scores)
-                metrics = compute_all_metrics(ranked, root_idx)
-                records.append(
-                    {
-                        "incident_id": i_inc,
-                        "visibility": vis,
-                        "method": method,
-                        "root_cause_idx": root_idx,
-                        "root_cause_node": graph["nodes"][root_idx],
-                        **metrics,
-                    }
-                )
-
-        elapsed = time.time() - t0
-        print(f"  vis={vis:.2f}: {elapsed:.1f}s")
-
-    df = pd.DataFrame(records)
-    out = RESULTS_DIR / "per_incident_ranks.csv"
-    df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
-    return df
-
-
-# ── Experiment 7: Real-World Anomaly Evaluation ──────────────────────────
-
-
-def experiment_real_world(
-    dataset_index: int,
-    methods: list[str],
     n_windows: int = 50,
-    seed: int = 42,
-    nrows: int | None = None,
 ) -> pd.DataFrame:
-    """Evaluate RCA methods on real anomaly windows from MSRTMCR data.
-
-    Uses structural plausibility metrics since no ground truth exists.
-    """
+    """Label-free plausibility of each method on real anomaly windows."""
+    from src.loader import load_msrt_mcr
     from src.rca.real_eval import (
         build_real_anomaly_vector,
         structural_plausibility_score,
     )
 
-    print("\n" + "=" * 70)
-    print("EXPERIMENT 7: Real-World Anomaly Evaluation")
-    print("=" * 70)
-
-    # Load graph
-    t0 = time.time()
-    graph = prepare_graph(dataset_index, nrows=nrows)
-    print(
-        f"  Graph: {graph['n_nodes']:,} nodes, {graph['n_edges']:,} edges"
-        f" ({time.time() - t0:.1f}s)"
-    )
-
-    # Load real anomaly windows
+    print(f"\n{'=' * 70}\nREAL: CallGraph_{dataset_index}\n{'=' * 70}")
     anomaly_path = RESULTS_DIR / "real_anomaly_windows.csv"
-    if not anomaly_path.exists():
-        print(f"  ERROR: {anomaly_path} not found. "
-              "Run scripts/analyze_real_metrics.py first.")
-        return pd.DataFrame()
+    msrtmcr_path = DATA_ROOT / "MSRTMCR" / "MCRRTUpdate_0.csv"
+    for p in (anomaly_path, msrtmcr_path):
+        if not p.exists():
+            print(
+                f"  ERROR: {p} not found (see scripts/analyze_real_metrics.py)"
+            )
+            return pd.DataFrame()
 
-    anomalies = pd.read_csv(anomaly_path)
-    anomaly_timestamps = sorted(anomalies["timestamp"].unique())
-    if len(anomaly_timestamps) > n_windows:
+    graph = prepare_graph(dataset_index)
+    timestamps = sorted(pd.read_csv(anomaly_path)["timestamp"].unique())
+    if len(timestamps) > n_windows:
         rng = np.random.default_rng(seed)
-        anomaly_timestamps = rng.choice(
-            anomaly_timestamps, size=n_windows, replace=False
-        ).tolist()
-
-    print(f"  Evaluating on {len(anomaly_timestamps)} real anomaly windows")
-
-    # Load MSRTMCR for building s_obs
-    msrtmcr_path = PROJECT_ROOT / "data" / "data" / "MSRTMCR" / "MCRRTUpdate_0.csv"
-    if not msrtmcr_path.exists():
-        print(f"  ERROR: {msrtmcr_path} not found.")
-        return pd.DataFrame()
-
-    from src.loader import load_msrt_mcr
+        timestamps = sorted(rng.choice(timestamps, n_windows, replace=False))
     msrtmcr_df = load_msrt_mcr(path=msrtmcr_path)
-    print(f"  Loaded MSRTMCR: {len(msrtmcr_df):,} rows")
+    print(f"  {len(timestamps)} windows, {len(msrtmcr_df):,} MSRTMCR rows")
 
+    methods = [m for m in methods if m not in TRACE_METHODS]
     records = []
-    for i, ts in enumerate(anomaly_timestamps):
-        s_obs = build_real_anomaly_vector(
-            msrtmcr_df, graph["nodes"], ts,
-        )
-
+    for i, ts in enumerate(timestamps):
+        s_obs = build_real_anomaly_vector(msrtmcr_df, graph["nodes"], ts)
         if s_obs.max() < 1e-6:
             continue
-
         for method in methods:
             scores = run_method(
-                method, graph["W"], graph["P_T"], s_obs,
-                root_idx=0, visibility=0.0, seed=seed, incident_idx=i,
+                method,
+                graph["W"],
+                graph["M_R"],
+                s_obs,
+                root_idx=-1,
+                visibility=0.0,
+                seed=seed,
+                incident_idx=i,
             )
             ranked = np.argsort(-scores)
-            plausibility = structural_plausibility_score(
-                ranked, graph["W"], s_obs, k=5,
+            records.append(
+                {
+                    "timestamp": ts,
+                    "method": method,
+                    "top_1": graph["nodes"][ranked[0]],
+                    **structural_plausibility_score(
+                        ranked, graph["W"], s_obs, k=5
+                    ),
+                }
             )
-
-            records.append({
-                "timestamp": ts,
-                "method": method,
-                "top_1": graph["nodes"][ranked[0]],
-                **plausibility,
-            })
-
-        if (i + 1) % 10 == 0:
-            print(f"    [{i + 1}/{len(anomaly_timestamps)}] windows processed")
 
     df = pd.DataFrame(records)
     out = RESULTS_DIR / "real_world_evaluation.csv"
     df.to_csv(out, index=False)
-    print(f"\nSaved: {out}")
-
-    # Print summary
-    if len(df) > 0:
-        summary = df.groupby("method").agg(
-            avg_downstream=("downstream_anomaly_ratio", "mean"),
-            avg_centrality=("anomaly_centrality", "mean"),
-            avg_coverage=("cascade_coverage", "mean"),
+    print(f"  Saved: {out}")
+    if len(df):
+        print(
+            df.pivot(
+                index="method", columns="timestamp", values="cascade_coverage"
+            )
+            .round(3)
+            .to_string()
         )
-        print("\n  Method plausibility summary:")
-        print(summary.to_string(float_format="%.4f"))
-
     return df
 
 
-# ── Main ────────────────────────────────────────────────────────────────
+# ── main ───────────────────────────────────────────────────────────────
+
+EXPERIMENTS = ["comparison", "compute", "convergence", "stats", "real"]
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="RCA Performance Evaluation Script"
-    )
-    parser.add_argument(
-        "--dataset-index",
-        type=int,
-        default=297,
-        help="CallGraph file index (default: 297, the largest by nodes)",
-    )
-    parser.add_argument(
-        "--n-incidents",
-        type=int,
-        default=200,
-        help="Number of simulated incidents per configuration (default: 200)",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed (default: 42)",
-    )
-    parser.add_argument(
-        "--quick",
-        action="store_true",
-        help="Quick mode: fewer sizes, visibilities, and incidents",
-    )
-    parser.add_argument(
-        "--experiments",
-        nargs="+",
-        type=int,
-        default=[1, 2, 3, 4, 5],
-        help="Which experiments to run (1-7, default: 1-5). "
-             "6=statistical tests, 7=real-world evaluation",
+        description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         "--dataset-indices",
         nargs="+",
         type=int,
-        default=None,
-        help="Multiple CallGraph indices for multi-topology evaluation. "
-             "Overrides --dataset-index for experiments 2 and 5.",
+        default=[84, 136, 297],
+        help="CallGraph indices for the comparison (default: 84 136 297)",
+    )
+    parser.add_argument(
+        "--primary-index",
+        type=int,
+        default=297,
+        help="Topology for compute, convergence, stats and real (default: 297)",
+    )
+    parser.add_argument("--n-incidents", type=int, default=200)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--experiments",
+        nargs="+",
+        choices=EXPERIMENTS,
+        default=EXPERIMENTS,
+    )
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=-1,
+        help="Parallel workers for the comparison (default: all CPUs)",
+    )
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Fewer visibilities, incidents, sizes and alphas",
     )
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Skip already-computed (dataset_index, visibility, method) tuples",
+        help="Skip comparison topologies whose result CSV already exists",
     )
     return parser.parse_args()
 
 
-def experiment_statistical_tests(
-    per_incident_path: Path | None = None,
-) -> dict[str, pd.DataFrame]:
-    """Experiment 6: Statistical significance tests on per-incident data."""
-    from src.rca.statistics import run_all_tests
-
-    print("\n" + "=" * 70)
-    print("EXPERIMENT 6: Statistical Significance Tests")
-    print("=" * 70)
-
-    if per_incident_path is None:
-        per_incident_path = RESULTS_DIR / "per_incident_ranks.csv"
-
-    if not per_incident_path.exists():
-        print(f"  ERROR: {per_incident_path} not found. Run experiment 5 first.")
-        return {}
-
-    df = pd.read_csv(per_incident_path)
-    print(f"  Loaded {len(df):,} rows from {per_incident_path.name}")
-
-    results = run_all_tests(df)
-
-    for name, res_df in results.items():
-        if len(res_df) > 0:
-            out = RESULTS_DIR / f"statistical_{name}.csv"
-            res_df.to_csv(out, index=False)
-            print(f"  Saved: {out}")
-
-    # Print summary
-    if "friedman" in results and len(results["friedman"]) > 0:
-        print("\n  Friedman test (omnibus):")
-        for _, row in results["friedman"].iterrows():
-            sig = "*" if row["significant"] else ""
-            print(f"    vis={row['visibility']:.2f}: chi2={row['chi2']:.1f}, "
-                  f"p={row['p_value']:.4g} {sig}")
-
-    if "wilcoxon" in results and len(results["wilcoxon"]) > 0:
-        print("\n  Wilcoxon signed-rank (significant at p<0.05):")
-        sig_rows = results["wilcoxon"][results["wilcoxon"]["significant_005"]]
-        for _, row in sig_rows.iterrows():
-            print(f"    {row['proposed']} vs {row['baseline']} "
-                  f"(vis={row['visibility']:.2f}): "
-                  f"p={row['p_value']:.4g}, r={row['effect_size_r']:.3f}")
-
-    return results
-
-
-def _load_existing_results(path: Path) -> pd.DataFrame | None:
-    """Load existing CSV results for resume support."""
-    if path.exists():
-        return pd.read_csv(path)
-    return None
-
-
-def main():
+def main() -> None:
     args = parse_args()
-
-    ALL_METHODS = [
-        "MicroRCA",
-        "CloudRanger",
-        "In-Degree",
-        "MicroHECL",
-        "TraceDiag",
-        "Neighbor Corr.",
-        "MonitorRank",
-        "MicroRank",
-        "CORAL",
-        "TraceRank",
-        "IRWR",
-        "eIRWR",
-    ]
-
-    # Multi-topology support
-    dataset_indices = args.dataset_indices or [args.dataset_index]
+    RESULTS_DIR.mkdir(exist_ok=True)
 
     if args.quick:
-        nrows_list = [500_000, 2_000_000, 5_000_000]
         visibilities = [0.0, 0.1, 0.3, 0.5]
         n_incidents = min(args.n_incidents, 50)
         comp_nrows = [500_000, 2_000_000]
         conv_nrows = [500_000, 2_000_000]
         alphas = [0.05, 0.15, 0.30]
     else:
-        nrows_list = [
-            100_000,
-            500_000,
-            1_000_000,
-            2_000_000,
-            5_000_000,
-            10_000_000,
-        ]
         visibilities = [0.0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5]
         n_incidents = args.n_incidents
         comp_nrows = [100_000, 500_000, 1_000_000, 2_000_000, 5_000_000]
         conv_nrows = [500_000, 1_000_000, 2_000_000, 5_000_000]
         alphas = [0.01, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50]
 
-    print(f"Datasets: {['CallGraph_' + str(i) for i in dataset_indices]}")
-    print(f"Incidents: {n_incidents}")
-    print(f"Dataset sizes: {nrows_list}")
-    print(f"Visibilities: {visibilities}")
-    print(f"Methods: {ALL_METHODS}")
     print(f"Experiments: {args.experiments}")
-    if args.resume:
-        print("Resume mode: ON")
-    print()
+    print(f"Topologies: {args.dataset_indices}, primary {args.primary_index}")
+    print(f"Incidents: {n_incidents}, visibilities: {visibilities}")
+    t_start = time.time()
 
-    total_t0 = time.time()
-
-    # Experiments 1, 3, 4 run on primary dataset only
-    primary_idx = dataset_indices[0]
-
-    if 1 in args.experiments:
-        experiment_scale_visibility(
-            dataset_index=primary_idx,
-            nrows_list=nrows_list,
-            visibilities=visibilities,
-            methods=ALL_METHODS,
-            n_incidents=n_incidents,
-            seed=args.seed,
-        )
-
-    # Experiments 2 and 5 run on all topologies
-    if 2 in args.experiments:
-        all_comparison_dfs = []
-        for ds_idx in dataset_indices:
-            checkpoint = RESULTS_DIR / f"full_comparison_metrics_CG{ds_idx}.csv"
-            if args.resume and checkpoint.exists():
-                print(f"\n  Resuming: loading {checkpoint.name}")
-                all_comparison_dfs.append(pd.read_csv(checkpoint))
+    if "comparison" in args.experiments:
+        frames = []
+        for idx in args.dataset_indices:
+            ckpt = RESULTS_DIR / f"full_comparison_metrics_CG{idx}.csv"
+            if args.resume and ckpt.exists():
+                print(f"\n  Resuming: {ckpt.name} exists, skipping")
+                frames.append(pd.read_csv(ckpt))
                 continue
-            result = experiment_full_comparison(
-                dataset_index=ds_idx,
-                visibilities=visibilities,
-                methods=ALL_METHODS,
-                n_incidents=n_incidents,
-                seed=args.seed,
+            frames.append(
+                experiment_comparison(
+                    idx,
+                    visibilities,
+                    ALL_METHODS,
+                    n_incidents,
+                    args.seed,
+                    args.n_jobs,
+                )
             )
-            result.to_csv(checkpoint, index=False)
-            all_comparison_dfs.append(result)
-
-        if len(all_comparison_dfs) > 1:
-            merged = pd.concat(all_comparison_dfs, ignore_index=True)
+        if len(frames) > 1:
             out = RESULTS_DIR / "multi_topology_metrics.csv"
-            merged.to_csv(out, index=False)
-            print(f"\nSaved multi-topology results: {out}")
+            pd.concat(frames, ignore_index=True).to_csv(out, index=False)
+            print(f"\nSaved: {out}")
 
-    if 3 in args.experiments:
-        experiment_computational(
-            dataset_index=primary_idx,
-            nrows_list=comp_nrows,
-            seed=args.seed,
+    if "compute" in args.experiments:
+        experiment_compute(
+            args.primary_index, comp_nrows, ALL_METHODS, args.seed
         )
 
-    if 4 in args.experiments:
+    if "convergence" in args.experiments:
         experiment_convergence(
-            dataset_index=primary_idx,
-            nrows_list=conv_nrows,
-            alphas=alphas,
-            seed=args.seed,
+            args.primary_index, conv_nrows, alphas, args.seed
         )
 
-    if 5 in args.experiments:
-        all_incident_dfs = []
-        for ds_idx in dataset_indices:
-            checkpoint = RESULTS_DIR / f"per_incident_ranks_CG{ds_idx}.csv"
-            if args.resume and checkpoint.exists():
-                print(f"\n  Resuming: loading {checkpoint.name}")
-                all_incident_dfs.append(pd.read_csv(checkpoint))
-                continue
-            result = experiment_per_incident(
-                dataset_index=ds_idx,
-                visibilities=visibilities,
-                methods=ALL_METHODS,
-                n_incidents=n_incidents,
-                seed=args.seed,
-            )
-            result.to_csv(checkpoint, index=False)
-            all_incident_dfs.append(result)
+    if "stats" in args.experiments:
+        experiment_stats(args.primary_index)
 
-        if len(all_incident_dfs) > 1:
-            merged = pd.concat(all_incident_dfs, ignore_index=True)
-            out = RESULTS_DIR / "multi_topology_per_incident.csv"
-            merged.to_csv(out, index=False)
-            print(f"\nSaved multi-topology per-incident results: {out}")
+    if "real" in args.experiments:
+        experiment_real(args.primary_index, ALL_METHODS, args.seed)
 
-    if 6 in args.experiments:
-        experiment_statistical_tests()
-
-    if 7 in args.experiments:
-        experiment_real_world(
-            dataset_index=primary_idx,
-            methods=ALL_METHODS,
-            seed=args.seed,
-        )
-
-    total_elapsed = time.time() - total_t0
-    print(f"\n{'=' * 70}")
-    print(f"All experiments completed in {total_elapsed:.1f}s")
-    print(f"Results saved to: {RESULTS_DIR}/")
-    print(f"{'=' * 70}")
+    print(f"\nAll experiments completed in {time.time() - t_start:.1f}s")
 
 
 if __name__ == "__main__":

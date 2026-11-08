@@ -36,7 +36,7 @@ def build_dependency_graph(
         Aggregated edges with columns [um, dm, request_count, avg_latency].
     """
     clean = df.dropna(subset=["um", "dm", "rt"])
-    # Filter out UNKNOWN placeholder nodes
+    # filter out UNKNOWN placeholder nodes
     clean = clean[(clean["um"] != "UNKNOWN") & (clean["dm"] != "UNKNOWN")]
 
     edges_df = (
@@ -86,7 +86,7 @@ def compute_weight_matrix(
 
     W = sparse.csr_matrix((vals, (rows, cols)), shape=(n, n), dtype=np.float64)
 
-    # Normalize each row: w_ij = lambda_ij / sum_k(lambda_ik)
+    # normalize each row: w_ij = lambda_ij / sum_k(lambda_ik)
     row_sums = np.array(W.sum(axis=1)).flatten()
     row_sums[row_sums == 0] = 1.0  # avoid division by zero for isolated nodes
     diag_inv = sparse.diags(1.0 / row_sums)
@@ -123,7 +123,7 @@ def compute_fault_propagation_matrix(
         R = np.full(n, R)
 
     # P[j, i] = W[i, j] * (1 - R[i])
-    # So P = (diag(1 - R) @ W)^T  = W^T @ diag(1 - R)
+    # so P = (diag(1 - R) @ W)^T  = W^T @ diag(1 - R)
     resilience_scale = sparse.diags(1.0 - R)
     P = (resilience_scale @ W).T
 

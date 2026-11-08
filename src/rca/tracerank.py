@@ -2,8 +2,8 @@
 TraceRank: Abnormal service localization with dis-aggregated
 end-to-end tracing data in cloud native systems.
 
-Strict implementation following Yu, Huang & Chen (2023),
-J Softw Evol Proc, doi:10.1002/smr.2413
+Implementation following Yu, Huang & Chen (2023),
+J. Softw. Evol. Process, doi:10.1002/smr.2413
 
 Components:
   - Spectrum scoring via Ochiai formula (Eq. 2)
@@ -20,13 +20,12 @@ import numpy as np
 from scipy import sparse
 from scipy.stats import pearsonr
 
-
 # ---------------------------------------------------------------------------
-# Spectrum scoring (Eq. 2)
+# spectrum scoring (Eq. 2)
 # ---------------------------------------------------------------------------
 
 
-def _ochiai_score(ef: int, ep: int, nf: int, np_: int) -> float:
+def _ochiai_score(ef: int, ep: int, nf: int) -> float:
     """Ochiai spectrum formula (Eq. 2).
 
     Score = ef / sqrt((ef + ep) * (ef + nf))
@@ -42,11 +41,10 @@ def _compute_spectrum_scores(
 ) -> np.ndarray:
     """Per-service Ochiai spectrum scores from disaggregated traces."""
     n_f = int(is_anomalous.sum())
-    n_p = len(traces) - n_f
 
     ef = np.zeros(n, dtype=int)
     ep = np.zeros(n, dtype=int)
-    for trace, anom in zip(traces, is_anomalous):
+    for trace, anom in zip(traces, is_anomalous, strict=True):
         for svc in trace:
             if svc < n:
                 if anom:
@@ -55,16 +53,15 @@ def _compute_spectrum_scores(
                     ep[svc] += 1
 
     nf = n_f - ef
-    np_arr = n_p - ep
 
     scores = np.zeros(n)
     for i in range(n):
-        scores[i] = _ochiai_score(int(ef[i]), int(ep[i]), int(nf[i]), int(np_arr[i]))
+        scores[i] = _ochiai_score(int(ef[i]), int(ep[i]), int(nf[i]))
     return scores
 
 
 # ---------------------------------------------------------------------------
-# Correlation scoring (Eq. 3)
+# correlation scoring (Eq. 3)
 # ---------------------------------------------------------------------------
 
 
@@ -107,7 +104,7 @@ def _compute_correlation_scores(
 
 
 # ---------------------------------------------------------------------------
-# Augmented adjacency matrix (Eq. 5)
+# augmented adjacency matrix (Eq. 5)
 # ---------------------------------------------------------------------------
 
 
@@ -120,33 +117,34 @@ def _build_augmented_matrix(
     """Build augmented adjacency A' (Eq. 5).
 
     Forward:  A'[i,j] = C[j]           where edge i -> j exists
-    Backward: A'[j,i] = rho * C[i]     where edge i -> j exists (no forward j -> i)
+    Backward: A'[j,i] = rho * C[i]     where edge i -> j exists
+                                       (and no forward edge j -> i)
     Selfward: A'[i,i] = max(0, C[i] - max_{child k} C[k])
     Front-end exception: A'[frontend, frontend] = 0
     """
     A = (W != 0).astype(np.float64)
     A_T = A.T.tocsr()
 
-    # Forward: weight by callee's correlation
+    # forward: weight by callee's correlation
     A_fwd = A @ sparse.diags(C)
 
-    # Backward: A_bwd[j,i] = rho * C[i] where A[i,j] != 0
+    # backward: A_bwd[j,i] = rho * C[i] where A[i,j] != 0
     A_bwd = A_T @ sparse.diags(rho * C)
-    # Remove backward entries where a forward edge already exists
+    # remove backward entries where a forward edge already exists
     A_bwd = A_bwd - A_bwd.multiply(A)
     A_bwd.eliminate_zeros()
 
-    # Selfward
+    # selfward
     max_child_C = np.asarray(A_fwd.max(axis=1).todense()).flatten()
     self_weights = np.maximum(0.0, C - max_child_C)
-    self_weights[frontend_idx] = 0.0  # Front-end exception
+    self_weights[frontend_idx] = 0.0  # front-end exception
     A_self = sparse.diags(self_weights)
 
     return (A_fwd + A_bwd + A_self).tocsr()
 
 
 # ---------------------------------------------------------------------------
-# Ranked List Correction (Algorithm 2)
+# ranked List Correction (Algorithm 2)
 # ---------------------------------------------------------------------------
 
 
@@ -167,12 +165,12 @@ def _ranked_list_correction(
     k = min(k, n)
     spectrum_topk = set(int(i) for i in np.argsort(-spectrum_scores)[:k])
 
-    # Per-service latency statistics
+    # per-service latency statistics
     D_a_sum = np.zeros(n)
     D_a_count = np.zeros(n)
     D_n_vals: list[list[float]] = [[] for _ in range(n)]
 
-    for trace, anom in zip(traces, is_anomalous):
+    for trace, anom in zip(traces, is_anomalous, strict=True):
         for svc, pt in trace.items():
             if svc >= n:
                 continue
@@ -192,7 +190,7 @@ def _ranked_list_correction(
             D_n_mean[svc] = np.mean(D_n_vals[svc])
             D_n_std[svc] = np.std(D_n_vals[svc])
 
-    # Build corrected ranking
+    # build corrected ranking
     promoted: list[int] = []
     demoted: list[int] = []
     for svc in ppr_ranked:
@@ -204,7 +202,7 @@ def _ranked_list_correction(
 
     final_order = promoted + demoted
 
-    # Higher score = more suspicious
+    # higher score = more suspicious
     scores = np.zeros(n)
     for rank, svc in enumerate(final_order):
         scores[svc] = float(n - rank)
@@ -212,7 +210,7 @@ def _ranked_list_correction(
 
 
 # ---------------------------------------------------------------------------
-# Main TraceRank function
+# main TraceRank function
 # ---------------------------------------------------------------------------
 
 
@@ -264,27 +262,27 @@ def tracerank(
     """
     n = W.shape[0]
 
-    # Step 1: Spectrum scores (Eq. 2)
+    # step 1: Spectrum scores (Eq. 2)
     spectrum = _compute_spectrum_scores(traces, is_anomalous, n)
 
-    # Step 2: Correlation scores (Eq. 3)
+    # step 2: Correlation scores (Eq. 3)
     C = _compute_correlation_scores(traces, frontend_idx, n)
 
-    # Step 3: Augmented adjacency matrix (Eq. 5)
+    # step 3: Augmented adjacency matrix (Eq. 5)
     A_prime = _build_augmented_matrix(W, C, rho, frontend_idx)
 
-    # Step 4: Transition probability matrix (Eq. 6)
+    # step 4: Transition probability matrix (Eq. 6)
     row_sums = np.asarray(A_prime.sum(axis=1)).flatten()
     row_sums[row_sums == 0] = 1.0
     P = sparse.diags(1.0 / row_sums) @ A_prime
 
-    # Step 5: Teleportation vector v (Eq. 7)
+    # step 5: Teleportation vector v (Eq. 7)
     v = C.copy()
-    v[frontend_idx] = 0.0  # Front-end exception
+    v[frontend_idx] = 0.0  # front-end exception
     v_sum = v.sum()
     v = v / v_sum if v_sum > 0 else np.ones(n) / n
 
-    # Step 6: Power iteration (Eq. 7)
+    # step 6: Power iteration (Eq. 7)
     x = v.copy()
     for _ in range(max_iter):
         x_new = d * P.T.dot(x) + (1 - d) * v
@@ -293,17 +291,34 @@ def tracerank(
             break
         x = x_new
 
-    # Step 7: Ranked List Correction (Algorithm 2)
+    # step 7: Ranked List Correction (Algorithm 2)
     ppr_ranked = np.argsort(-x)
     scores = _ranked_list_correction(
-        ppr_ranked, spectrum, traces, is_anomalous, n, gamma, spectrum_k,
+        ppr_ranked,
+        spectrum,
+        traces,
+        is_anomalous,
+        n,
+        gamma,
+        spectrum_k,
     )
     return scores
 
 
 # ---------------------------------------------------------------------------
-# Trace data simulation for evaluation
+# trace data simulation for evaluation
 # ---------------------------------------------------------------------------
+
+
+def _positive_neighbours(M: sparse.spmatrix) -> list[list[int]]:
+    """Per row, the sorted column indices with a positive entry."""
+    M = M.tocsr()
+    adj: list[list[int]] = []
+    for i in range(M.shape[0]):
+        lo, hi = M.indptr[i], M.indptr[i + 1]
+        cols = M.indices[lo:hi][M.data[lo:hi] > 0]
+        adj.append(np.sort(cols).tolist())
+    return adj
 
 
 def simulate_trace_data(
@@ -359,11 +374,10 @@ def simulate_trace_data(
     is_anomalous : np.ndarray of bool
     frontend_idx : int
     """
-    n = W.shape[0]
     if rng is None:
         rng = np.random.default_rng()
 
-    # -- Identify the frontend (entry-point) service -------------------------
+    # -- identify the frontend (entry-point) service -------------------------
     in_weights = np.asarray(W.sum(axis=0)).flatten()
     out_weights = np.asarray(W.sum(axis=1)).flatten()
 
@@ -374,12 +388,8 @@ def simulate_trace_data(
         ratio = out_weights / np.maximum(in_weights, 1e-10)
         frontend_idx = int(np.argmax(ratio))
 
-    # -- Adjacency list ------------------------------------------------------
-    W_csr = W.tocsr()
-    adj: list[list[int]] = []
-    for i in range(n):
-        row = W_csr[i].toarray().flatten()
-        adj.append(np.where(row > 0)[0].tolist())
+    # -- adjacency list ------------------------------------------------------
+    adj = _positive_neighbours(W)
 
     # -- BFS path from frontend to root cause --------------------------------
     def bfs_path(start: int, target: int) -> list[int] | None:
@@ -397,8 +407,8 @@ def simulate_trace_data(
 
     path_to_root = bfs_path(frontend_idx, root_cause_idx)
 
-    # -- Cascade weights (from root cause through callers) -------------------
-    W_T = W.T.tocsr()
+    # -- cascade weights (from root cause through callers) -------------------
+    callers = _positive_neighbours(W.T)
     cascade: dict[int, float] = {}
     cq: deque[tuple[int, float]] = deque([(root_cause_idx, 1.0)])
     visited_c: set[int] = set()
@@ -408,12 +418,11 @@ def simulate_trace_data(
             continue
         visited_c.add(node)
         cascade[node] = factor
-        row = W_T[node].toarray().flatten()
-        for caller in np.where(row > 0)[0]:
+        for caller in callers[node]:
             if caller not in visited_c:
                 cq.append((caller, factor * cascade_decay))
 
-    # -- Trace generator -----------------------------------------------------
+    # -- trace generator -----------------------------------------------------
     def make_trace(force_root: bool) -> dict[int, float]:
         trace: dict[int, float] = {}
         stack = [frontend_idx]
@@ -441,29 +450,33 @@ def simulate_trace_data(
                 )
         return trace
 
-    # -- Generate anomalous traces -------------------------------------------
+    # -- generate anomalous traces -------------------------------------------
     traces: list[dict[int, float]] = []
     labels: list[bool] = []
 
     for _ in range(n_anomalous):
         trace = make_trace(force_root=True)
-        # Root cause latency: scaled by visibility (0 = normal, 1 = full anomaly)
-        root_elevation = root_cause_visibility * base_latency * (anomaly_factor - 1)
+        # root cause latency scaled by visibility (0 normal, 1 full anomaly)
+        root_elevation = (
+            root_cause_visibility * base_latency * (anomaly_factor - 1)
+        )
         trace[root_cause_idx] = max(
             0.1, base_latency + root_elevation + rng.normal(0, noise_std)
         )
-        # Cascade to callers: scaled by visibility so difficulty matches s_obs
+        # cascade to callers: scaled by visibility so difficulty matches s_obs
         for node, factor in cascade.items():
             if node in trace and node != root_cause_idx:
                 trace[node] += (
-                    base_latency * (anomaly_factor - 1)
-                    * factor * root_cause_visibility
+                    base_latency
+                    * (anomaly_factor - 1)
+                    * factor
+                    * root_cause_visibility
                 )
         traces.append(trace)
         labels.append(True)
 
-    # -- Generate normal traces ----------------------------------------------
-    # Include root cause path in some normal traces so that spectrum scoring
+    # -- generate normal traces ----------------------------------------------
+    # include root cause path in some normal traces so that spectrum scoring
     # cannot trivially discriminate (in real systems normal requests also
     # reach the root cause service).
     for _ in range(n_normal):
