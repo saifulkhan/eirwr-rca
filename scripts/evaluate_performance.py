@@ -13,7 +13,8 @@ Experiments (select with ``--experiments``):
   convergence  IRWR/eIRWR iterations vs restart probability
                (Fig. convergence).
   stats        Friedman, Wilcoxon and Cliff's delta on the per-incident
-               ranks of the primary topology (Table wilcoxon).
+               ranks of the primary topology (Table wilcoxon). The
+               trace-level methods are left out, as in the paper.
   real         Label-free evaluation on real anomaly windows
                (Table real-world). Run scripts/analyze_real_metrics.py
                first.
@@ -477,12 +478,15 @@ def experiment_stats(dataset_index: int) -> None:
         print(f"  ERROR: {path} not found. Run the comparison first.")
         return
     df = pd.read_csv(path)
+    # the trace-level methods are not part of the paper's comparison, so the
+    # tests cover the aggregate-metric methods only (as in experiment_real)
+    df = df[~df["method"].isin(TRACE_METHODS)]
     for name, res in run_all_tests(df).items():
         out = RESULTS_DIR / f"statistical_{name}.csv"
         res.to_csv(out, index=False)
         print(f"  Saved: {out}")
         if name == "wilcoxon":
-            cols = ["baseline", "p_value", "effect_size_r"]
+            cols = ["baseline", "p_value", "effect_size_r", "proposed_better"]
             print(res[res["visibility"] == 0.3][cols].to_string(index=False))
 
 

@@ -180,9 +180,9 @@ def bootstrap_mrr_ci(
 def plot_mrr_vs_visibility(
     mean_df: pd.DataFrame,
     *,
-    visibilities: list[float] = VISIBILITIES,
+    visibilities: list[float] | None = None,
     methods: list[str] = ACCURACY_METHODS,
-    figsize: tuple[float, float] = (SINGLE_COL_IN, 1.55),
+    figsize: tuple[float, float] = (SINGLE_COL_IN, 1.85),
 ) -> plt.Figure:
     """MRR vs root-cause visibility, one line per method (single column).
 
@@ -192,8 +192,12 @@ def plot_mrr_vs_visibility(
         Long-form frame with columns ``method``, ``visibility``, ``MRR``
         (typically averaged over topologies). If it also has ``lo`` and
         ``hi`` columns, a shaded confidence band is drawn per method.
+    visibilities : list of float, optional
+        Visibility levels to plot. Default: every level in ``mean_df``.
     """
     set_publication_style()
+    if visibilities is None:
+        visibilities = sorted(mean_df["visibility"].unique())
     fig, ax = plt.subplots(figsize=figsize)
     for method in methods:
         sub = mean_df[
@@ -214,9 +218,11 @@ def plot_mrr_vs_visibility(
             )
     ax.set_xlabel("Root-cause visibility ($v$)")
     ax.set_ylabel("MRR")
-    ax.set_xticks(visibilities)
+    # ticks every 0.1, so unevenly spaced levels do not crowd the axis
+    ax.set_xticks(np.round(np.arange(0, max(visibilities) + 1e-9, 0.1), 1))
     ax.set_ylim(0, 1.0)
-    ax.legend(ncol=2, loc="upper left")
+    # legend above the axes: the lines fill the upper part of the plot
+    fig.legend(loc="outside upper center", ncol=3, handlelength=1.6)
     return _whiten(fig, ax)
 
 
@@ -227,7 +233,7 @@ def plot_mrr_by_topology(
     methods: list[str] = ACCURACY_METHODS,
     visibility: float = 0.3,
     ci: pd.DataFrame | None = None,
-    figsize: tuple[float, float] = (SINGLE_COL_IN, 1.5),
+    figsize: tuple[float, float] = (SINGLE_COL_IN, 1.8),
 ) -> plt.Figure:
     """Grouped bars: MRR per method across topologies (single column).
 
@@ -273,8 +279,8 @@ def plot_mrr_by_topology(
     ax.set_ylabel(f"MRR at $v={visibility}$")
     ax.set_ylim(0, 1.0)
     ax.grid(axis="x", visible=False)
-    # legend sits in the empty band above the bars (MRR < 0.8 everywhere)
-    ax.legend(ncol=3, loc="upper center", handlelength=1.0)
+    # legend above the axes: the eIRWR bars reach MRR 0.8
+    fig.legend(loc="outside upper center", ncol=3, handlelength=1.0)
     return _whiten(fig, ax)
 
 

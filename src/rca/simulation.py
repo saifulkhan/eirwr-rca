@@ -28,7 +28,8 @@ def simulate_anomaly(
     - The root cause is NOT necessarily the loudest signal
 
     Propagates anomaly scores *backward* through the dependency graph
-    (from callee to callers) using W^T, with geometric decay at each hop.
+    (from callee to callers) with geometric decay at each hop. A caller
+    inherits the share of its calls that go to the faulty callee.
 
     Parameters
     ----------
@@ -41,7 +42,8 @@ def simulate_anomaly(
     decay : float
         Multiplicative decay per hop (0 < decay < 1).
     noise_level : float
-        Std-dev of Gaussian noise added to all nodes.
+        Scale of the half-normal noise |N(0, noise_level^2)| added to
+        all nodes.
     root_cause_visibility : float
         Anomaly score of the root cause itself (0-1). Lower values
         make the problem harder (root cause is less obviously anomalous).
@@ -59,22 +61,22 @@ def simulate_anomaly(
     n = W.shape[0]
     s = np.zeros(n)
 
-    # root cause shows moderate anomaly (not dominant)
+    # the anomaly score of the root cause itself is its visibility
     s[root_cause_idx] = root_cause_visibility
 
     # propagate backward: callers of the faulty service observe symptoms.
-    # W^T[i, j] = W[j, i] = weight of edge j -> i, so W^T propagates
-    # influence from callees back to callers.
-    W_T = W.T.tocsr()
+    # W[i, j] is the share of the calls of i that go to j, so W.dot(current)
+    # gives caller i the signal sum_j W[i, j] * current[j] of its callees.
+    # (W^T would move the signal the other way, from callers to callees.)
     current = np.zeros(n)
     current[root_cause_idx] = 1.0
 
     for _step in range(propagation_steps):
-        propagated = W_T.dot(current) * decay
+        propagated = W.dot(current) * decay
         s += propagated
         current = propagated
 
-    # add background noise to all nodes
+    # add half-normal background noise to all nodes
     s += np.abs(rng.normal(0, noise_level, n))
 
     # normalize to create a proper probability distribution

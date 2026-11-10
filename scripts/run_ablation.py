@@ -9,6 +9,12 @@ simulated incidents:
   3. Basic IRWR        — power iteration on M_R = diag(1-R) W, R=0.1
   4. PPR tuned         — PPR on W with alpha_eff = 1-(1-alpha)(1-R) = 0.235
   5. eIRWR (full)     — enhanced method, code defaults
+  6. eIRWR with one mechanism switched off: no backward edges (rho=0),
+     no self-loops, no sharpening (q=1)
+  7. eIRWR with all three switched off (forward transitions only), which
+     keeps only the belief-weighted forward transitions of Eq. 8
+  8. eIRWR with anomaly-conditioned resilience beta in {0, 1, 5, 10}
+     (the default is beta=2)
 
 Rows 3 and 4 should produce identical rankings (Proposition 1 in the
 paper: uniform resilience damping is an effective restart).
@@ -87,6 +93,28 @@ def main() -> None:
             W, s, alpha=ALPHA_EFF
         ),
         "eIRWR (full)": lambda s: irwr_enhanced(W, s)[0],
+        # one eIRWR mechanism switched off at a time
+        "eIRWR, no backward edges (rho=0)": lambda s: irwr_enhanced(
+            W, s, backward=0.0
+        )[0],
+        "eIRWR, no self-loops": lambda s: irwr_enhanced(W, s, self_loops=False)[
+            0
+        ],
+        "eIRWR, no sharpening (q=1)": lambda s: irwr_enhanced(
+            W, s, teleport_q=1.0
+        )[0],
+        # all three switched off: only the belief-weighted forward
+        # transitions of Eq. 8 remain
+        "eIRWR, forward transitions only": lambda s: irwr_enhanced(
+            W, s, backward=0.0, self_loops=False, teleport_q=1.0
+        )[0],
+        # anomaly-conditioned resilience: default beta = 2
+        **{
+            f"eIRWR, beta={b:g}": (
+                lambda s, b=b: irwr_enhanced(W, s, beta=b)[0]
+            )
+            for b in (0.0, 1.0, 5.0, 10.0)
+        },
     }
 
     records = []

@@ -118,9 +118,10 @@ were chosen and writes `results/topology_stats.csv` and
    counts.
 2. **Anomaly injection.** For each simulated incident, pick a random
    callee as the root cause. Propagate the fault backward to its callers
-   with geometric decay (0.6 per hop, 5 hops) and add Gaussian noise
-   (standard deviation 0.05). The visibility parameter sets the anomaly
-   score of the root cause itself.
+   with geometric decay (0.6 per hop, 5 hops) and add half-normal noise
+   (the absolute value of Gaussian noise with standard deviation 0.05).
+   The visibility parameter sets the anomaly score of the root cause
+   itself.
 3. **RCA.** Every method ranks all services for the same incidents.
 4. **Metrics.** PR@k is the fraction of incidents with the true root
    cause in the top k. MRR is the mean of 1/rank.
@@ -128,6 +129,7 @@ were chosen and writes `results/topology_stats.csv` and
 Trace-level methods (MicroRank, TraceRank) are evaluated on traces
 simulated from the true root cause. They therefore act as an upper
 bound and are not part of the aggregate-metric comparison in the paper.
+The statistical tests (`statistical_*.csv`) also leave them out.
 In the result files, Corr-Fusion is named `CORAL`.
 
 ## Using eIRWR on your own graph
@@ -157,7 +159,7 @@ src/rca/statistics.py  Friedman, Wilcoxon, Cliff's delta, Nemenyi
 src/rca/real_eval.py   real anomaly vectors, label-free metrics
 src/vis/               paper figures
 scripts/               experiment entry points
-notebooks/             method tutorial and figure notebook
+notebooks/             method tutorial, paper figures, and the Fig. 1-2 example
 ```
 
 ## Citation

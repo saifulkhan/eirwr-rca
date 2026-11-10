@@ -74,15 +74,17 @@ def irwr_enhanced(
     backward: float = 0.3,
     teleport_q: float = 2.0,
     adaptive_teleport: bool = True,
+    self_loops: bool = True,
 ) -> tuple[np.ndarray, int]:
     """Enhanced IRWR (eIRWR), Algorithm 1 in the paper.
 
     Mechanisms (paper symbols in brackets):
 
     1. Anomaly-conditioned resilience: R_i = R_base * exp(-beta * s_i / max s).
-    2. Belief-weighted forward transitions, plus backward edges with
-       weight ``backward`` [rho] and self-loops for nodes whose belief
-       exceeds that of every neighbour. Rows are re-normalized.
+    2. Belief-weighted forward transitions, plus backward edges from each
+       callee j to its callers with weight ``backward`` * C_j [rho] and
+       self-loops for nodes whose belief exceeds their largest transition
+       weight. Rows are re-normalized.
     3. Sharpened restart distribution v = b^q / ||b^q||_1 [q], where the
        exponent is reduced towards 1 when the belief peak-to-mean ratio
        is low (``adaptive_teleport``).
@@ -117,6 +119,10 @@ def irwr_enhanced(
     adaptive_teleport : bool
         Interpolate the exponent between 1 and ``teleport_q`` based on
         the belief peak-to-mean ratio (Eq. adaptive-q in the paper).
+    self_loops : bool
+        Add self-loops for nodes whose belief exceeds their largest
+        transition weight (Eq. self-loop in the paper). False disables
+        them, for ablation.
 
     Returns
     -------
@@ -153,10 +159,11 @@ def irwr_enhanced(
             A_bwd.eliminate_zeros()
             M = M + A_bwd
 
-        # self-loops for nodes more suspicious than all their neighbours
-        max_nb = np.asarray(M.max(axis=1).todense()).flatten()
-        self_w = np.maximum(0.0, C - max_nb)
-        M = M + sparse.diags(self_w)
+        # self-loops for nodes whose belief exceeds their largest transition
+        if self_loops:
+            max_nb = np.asarray(M.max(axis=1).todense()).flatten()
+            self_w = np.maximum(0.0, C - max_nb)
+            M = M + sparse.diags(self_w)
 
         # row-normalize
         rs = np.asarray(M.sum(axis=1)).flatten()

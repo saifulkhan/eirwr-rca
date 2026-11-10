@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import friedmanchisquare, wilcoxon
+from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 
 # ── pairwise Wilcoxon signed-rank ──────────────────────────────────────
 
@@ -19,7 +19,7 @@ def pairwise_wilcoxon(
     proposed: str,
     baselines: list[str],
     metric: str = "rank",
-    alternative: str = "less",
+    alternative: str = "two-sided",
 ) -> pd.DataFrame:
     """Wilcoxon signed-rank test: proposed vs each baseline.
 
@@ -34,12 +34,16 @@ def pairwise_wilcoxon(
     metric : str
         Column to compare (default "rank"; lower is better).
     alternative : str
+        "two-sided" (default) tests for a difference in either direction;
         "less" tests if proposed ranks are significantly lower (better).
 
     Returns
     -------
     pd.DataFrame with columns [visibility, baseline, statistic, p_value,
-    effect_size_r, significant_001, significant_005].
+    effect_size_r, proposed_better, significant_001, significant_005].
+    ``proposed_better`` is True when the proposed method has the lower
+    (better) values, i.e. the negative differences carry the larger rank
+    sum. It gives the direction of the effect that ``p_value`` tests.
     """
     rows = []
     visibilities = sorted(per_incident_df["visibility"].unique())
@@ -77,6 +81,7 @@ def pairwise_wilcoxon(
                         "statistic": np.nan,
                         "p_value": 1.0,
                         "effect_size_r": 0.0,
+                        "proposed_better": False,
                         "significant_001": False,
                         "significant_005": False,
                     }
@@ -89,6 +94,13 @@ def pairwise_wilcoxon(
             # (scipy drops zero differences before ranking)
             z = wilcoxon(x, y, alternative=alternative, method="approx")
             r = abs(z.zstatistic) / np.sqrt(np.count_nonzero(diffs))
+            # direction of the effect: compare the rank sums of the negative
+            # differences (proposed lower) and the positive ones
+            nonzero = diffs[diffs != 0]
+            abs_ranks = rankdata(np.abs(nonzero))
+            proposed_better = bool(
+                abs_ranks[nonzero < 0].sum() > abs_ranks[nonzero > 0].sum()
+            )
 
             rows.append(
                 {
@@ -97,6 +109,7 @@ def pairwise_wilcoxon(
                     "statistic": stat,
                     "p_value": p,
                     "effect_size_r": r,
+                    "proposed_better": proposed_better,
                     "significant_001": p < 0.001,
                     "significant_005": p < 0.05,
                 }
