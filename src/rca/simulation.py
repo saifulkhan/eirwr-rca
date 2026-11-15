@@ -1,0 +1,125 @@
+"""Anomaly simulation via chaos-engineering-style fault injection.
+
+Simulates cascading failures from a root cause node through the
+dependency graph with geometric decay and background noise.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+from scipy import sparse
+
+
+def simulate_anomaly(
+    W: sparse.csr_matrix,
+    root_cause_idx: int,
+    propagation_steps: int = 5,
+    decay: float = 0.6,
+    noise_level: float = 0.05,
+    root_cause_visibility: float = 0.3,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Simulate a cascading failure from a root cause node.
+
+    Models a realistic monitoring scenario where:
+    - The root cause service shows a moderate anomaly signal
+    - Callers of the faulty service observe cascading latency/errors
+    - Background noise exists across all services
+    - The root cause is NOT necessarily the loudest signal
+
+    Propagates anomaly scores *backward* through the dependency graph
+    (from callee to callers) with geometric decay at each hop. A caller
+    inherits the share of its calls that go to the faulty callee.
+
+    Parameters
+    ----------
+    W : scipy.sparse.csr_matrix
+        N x N weight matrix (caller -> callee direction).
+    root_cause_idx : int
+        Index of the injected root cause node.
+    propagation_steps : int
+        Number of hops to propagate the anomaly.
+    decay : float
+        Multiplicative decay per hop (0 < decay < 1).
+    noise_level : float
+        Scale of the half-normal noise |N(0, noise_level^2)| added to
+        all nodes.
+    root_cause_visibility : float
+        Anomaly score of the root cause itself (0-1). Lower values
+        make the problem harder (root cause is less obviously anomalous).
+    rng : np.random.Generator, optional
+        Random number generator for reproducibility.
+
+    Returns
+    -------
+    s_obs : np.ndarray
+        Simulated observed anomaly vector (N,), normalized to sum to 1.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    n = W.shape[0]
+    s = np.zeros(n)
+
+    # the anomaly score of the root cause itself is its visibility
+    s[root_cause_idx] = root_cause_visibility
+
+    # propagate backward: callers of the faulty service observe symptoms.
+    # W[i, j] is the share of the calls of i that go to j, so W.dot(current)
+    # gives caller i the signal sum_j W[i, j] * current[j] of its callees.
+    # (W^T would move the signal the other way, from callers to callees.)
+    current = np.zeros(n)
+    current[root_cause_idx] = 1.0
+
+    for _step in range(propagation_steps):
+        propagated = W.dot(current) * decay
+        s += propagated
+        current = propagated
+
+    # add half-normal background noise to all nodes
+    s += np.abs(rng.normal(0, noise_level, n))
+
+    # normalize to create a proper probability distribution
+    total = s.sum()
+    if total > 0:
+        s /= total
+
+    return s
+
+
+def draw_root_causes(
+    callee_indices: list[int],
+    n_incidents: int,
+    seed: int,
+) -> list[int]:
+    """Root causes of the simulated incidents.
+
+    Drawn from ``default_rng(seed)``, so every visibility level and every
+    experiment (comparison, ablation) uses the same root causes.
+    """
+    rng = np.random.default_rng(seed)
+    return [rng.choice(callee_indices) for _ in range(n_incidents)]
+
+
+def simulate_incident(
+    W: sparse.csr_matrix,
+    root_cause_idx: int,
+    visibility: float,
+    seed: int,
+    incident_idx: int,
+) -> np.ndarray:
+    """Anomaly vector of simulated incident ``incident_idx``.
+
+    Uses the settings of the paper (5 hops, decay 0.6, noise 0.05). The
+    noise comes from ``default_rng(seed * 100000 + incident_idx)``, so an
+    incident does not depend on the order in which incidents are run.
+    """
+    return simulate_anomaly(
+        W,
+        root_cause_idx,
+        propagation_steps=5,
+        decay=0.6,
+        noise_level=0.05,
+        root_cause_visibility=visibility,
+        rng=np.random.default_rng(seed * 100000 + incident_idx),
+    )

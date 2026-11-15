@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "eIRWR: Enhanced Iterative Random Walk with Restart"
+authors:
+  - family-names: Khan
+    given-names: Saiful
+  - family-names: Farea
+    given-names: Afrah
+license: MIT
+repository-code: "https://github.com/saifulkhan/eirwr-rca"
+preferred-citation:
+  type: article
+  title: "eIRWR: Enhanced Iterative Random Walk with Restart for Scalable Root Cause Analysis in Microservices"
+  authors:
+    - family-names: Khan
+      given-names: Saiful
+    - family-names: Farea
+      given-names: Afrah
+  year: 2026
+  journal: "arXiv preprint"
+  identifiers:
+    - type: other
+      value: "arXiv:2608.08073"
+  url: "https://arxiv.org/abs/2608.08073"
